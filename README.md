@@ -16,7 +16,11 @@ Ghost-Clicker/
 ├── .env.example         # modèle sans endpoint ni identifiant réel
 ├── .env                 # configuration locale à créer, ignorée par Git
 ├── .gitignore           # exclut secrets, venv, caches et résultats générés
-├── requirements.txt     # dépendances Python
+├── requirements.txt     # dépendances Python et serveur web
+├── web.py               # interface web Render et lancement manuel sécurisé
+├── Dockerfile           # image Playwright utilisée sur Render
+├── render.yaml          # Blueprint du Web Service Render
+├── .env.render.example  # variables à recopier dans Render
 ├── tests/
 │   └── test_main.py     # tests unitaires sans connexion proxy
 └── results/
@@ -227,9 +231,43 @@ Les identifiants et mots de passe ne sont jamais écrits dans le CSV ou le dashb
 ### `requirements.txt`
 
 - `playwright` pilote Chromium ;
-- `python-dotenv` charge `.env`.
+- `python-dotenv` charge `.env` ;
+- `Flask` expose l’interface Render ;
+- `gunicorn` sert l’application web en production.
 
-## 5. Lancer le programme
+## 5. Déploiement sur Render
+
+Le dépôt contient un Blueprint `render.yaml` et un `Dockerfile` fondé sur l’image officielle Playwright. Sur Render, Chromium fonctionne obligatoirement avec `HEADLESS=true` : le navigateur n’est pas visible dans un conteneur cloud.
+
+1. Dans Render, choisissez **New → Blueprint** et connectez ce dépôt GitHub.
+2. Render détecte `render.yaml` et crée le Web Service.
+3. Dans **Environment**, renseignez les variables marquées `sync: false` :
+   - `RAYOBYTE_US_USERNAME` : nouvel utilisateur Rayobyte ;
+   - `RAYOBYTE_US_PASSWORD` : mot de passe complet se terminant par `-country-US` ;
+   - `TARGET_URLS` : URL définitives, au format JSON ou une URL par ligne ;
+   - `ALLOWED_DOMAINS` : domaines correspondants sans protocole.
+4. `ADMIN_TOKEN` est généré automatiquement par Render. L’interface utilise HTTP Basic avec l’utilisateur `admin` et ce token comme mot de passe.
+5. Déployez, ouvrez l’URL Render, connectez-vous et cliquez sur **Lancer le contrôle**.
+
+Exemple recommandé pour `TARGET_URLS` :
+
+```json
+["https://site1.example/", "https://site2.example/page"]
+```
+
+Exemple pour `ALLOWED_DOMAINS` :
+
+```text
+site1.example,site2.example
+```
+
+Pour modifier les URL, changez `TARGET_URLS` et `ALLOWED_DOMAINS` dans **Render → Environment**, puis lancez un redéploiement. Le pool ZIP est généré directement en mémoire au démarrage à partir des secrets Render : aucun fichier `.env` secret n’entre dans l’image Docker.
+
+Ce déploiement utilise volontairement un stockage temporaire (`/tmp/ghost-clicker-results`). Le CSV et le dashboard peuvent disparaître lors d’un redémarrage, d’une mise en veille ou d’un redéploiement. Utilisez un Persistent Disk si vous souhaitez conserver l’historique.
+
+Le fichier `.env.render.example` contient toutes les clés à recopier. Il ne contient aucun véritable identifiant.
+
+## 6. Lancer le programme localement
 
 À chaque nouvelle session PowerShell :
 
@@ -252,7 +290,7 @@ Codes de sortie :
 - `2` : configuration inutilisable ;
 - `130` : interruption avec `Ctrl+C`.
 
-## 6. Procédure de test étape par étape
+## 7. Procédure de test étape par étape
 
 1. **Vérifier le compte fournisseur**
    Confirmez dans Rayobyte que l’offre résidentielle est active, que l’usage prévu est autorisé et que les sorties US/CA sont disponibles.
@@ -291,7 +329,7 @@ Codes de sortie :
     python -m unittest discover -s tests -v
     ```
 
-## 7. Dépannage
+## 8. Dépannage
 
 ### Chromium n’est pas installé
 

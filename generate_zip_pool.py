@@ -16,6 +16,7 @@ import random
 import re
 import string
 from collections import Counter
+from collections.abc import MutableMapping
 from pathlib import Path
 
 POOL_START = "# --- GHOST_CLICKER_ZIP_POOL_START ---"
@@ -99,6 +100,50 @@ def choose_zip_sequence(
     return selected[:size]
 
 
+def build_profiles(zip_codes: list[str], size: int) -> list[tuple[str, str]]:
+    if not 1 <= size <= 500:
+        raise PoolConfigurationError("La taille du pool doit être comprise entre 1 et 500.")
+    rng = random.SystemRandom()
+    selected_zips = choose_zip_sequence(zip_codes, size, rng)
+    sessions: set[str] = set()
+    return [(zip_code, make_session(sessions, rng)) for zip_code in selected_zips]
+
+
+def require_base_values(values: MutableMapping[str, str]) -> str:
+    for variable in (
+        "RAYOBYTE_US_PROXY_SERVER",
+        "RAYOBYTE_US_USERNAME",
+        "RAYOBYTE_US_PASSWORD",
+    ):
+        if not values.get(variable, "").strip():
+            raise PoolConfigurationError(f"Variable absente ou vide : {variable}.")
+    return country_password_prefix(values["RAYOBYTE_US_PASSWORD"].strip())
+
+
+def populate_runtime_pool(
+    environment: MutableMapping[str, str],
+    zip_path: Path,
+    proxy_path: Path,
+    size: int,
+) -> Counter[str]:
+    """Construit le pool dans l'environnement du processus, sans fichier .env."""
+
+    zip_codes = load_zip_codes(zip_path)
+    prefix = require_base_values(environment)
+    profiles = build_profiles(zip_codes, size)
+
+    for key in list(environment):
+        if key.startswith("RAYOBYTE_US_POOL_PASSWORD_"):
+            del environment[key]
+    for index, (zip_code, session) in enumerate(profiles, start=1):
+        environment[f"RAYOBYTE_US_POOL_PASSWORD_{index:03d}"] = (
+            f"{prefix}-zip-{zip_code}-session-{session}"
+        )
+
+    write_proxy_list(proxy_path, profiles)
+    return Counter(zip_code for zip_code, _session in profiles)
+
+
 def remove_generated_block(content: str) -> str:
     if POOL_START not in content and POOL_END not in content:
         return content.rstrip()
@@ -148,33 +193,19 @@ def write_proxy_list(path: Path, profiles: list[tuple[str, str]]) -> None:
 def generate_pool(
     env_path: Path, zip_path: Path, proxy_path: Path, size: int
 ) -> Counter[str]:
-    if not 1 <= size <= 500:
-        raise PoolConfigurationError("La taille du pool doit être comprise entre 1 et 500.")
     if not env_path.exists():
         raise PoolConfigurationError(
             ".env est introuvable. Copiez d'abord .env.example vers .env."
         )
 
     values = load_dotenv_values(env_path)
-    for variable in (
-        "RAYOBYTE_US_PROXY_SERVER",
-        "RAYOBYTE_US_USERNAME",
-        "RAYOBYTE_US_PASSWORD",
-    ):
-        if not values.get(variable, "").strip():
-            raise PoolConfigurationError(f"Variable absente ou vide : {variable}.")
-
-    zip_codes = load_zip_codes(zip_path)
-    prefix = country_password_prefix(values["RAYOBYTE_US_PASSWORD"].strip())
-    rng = random.SystemRandom()
-    selected_zips = choose_zip_sequence(zip_codes, size, rng)
-    sessions: set[str] = set()
-    profiles = [(zip_code, make_session(sessions, rng)) for zip_code in selected_zips]
+    prefix = require_base_values(values)
+    profiles = build_profiles(load_zip_codes(zip_path), size)
 
     original_env = env_path.read_text(encoding="utf-8")
     write_env_pool(env_path, original_env, prefix, profiles)
     write_proxy_list(proxy_path, profiles)
-    return Counter(selected_zips)
+    return Counter(zip_code for zip_code, _session in profiles)
 
 
 def parse_args() -> argparse.Namespace:

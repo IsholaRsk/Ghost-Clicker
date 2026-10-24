@@ -344,32 +344,65 @@ def install_navigation_guard(page: Any, allowed_domains: Sequence[str] = ()) -> 
     page.route("**/*", handle_route)
 
 
+def validate_link_entries(
+    entries: Iterable[tuple[int, str]], allowed_domains: Sequence[str] = ()
+) -> tuple[list[str], list[InvalidLink]]:
+    valid: list[str] = []
+    invalid: list[InvalidLink] = []
+    seen: set[str] = set()
+
+    for line_number, raw_value in entries:
+        value = raw_value.strip()
+        if not value or value.startswith("#"):
+            continue
+        try:
+            url = validate_url(value, allowed_domains)
+        except ValueError as exc:
+            invalid.append(InvalidLink(line_number, value, str(exc)))
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        valid.append(url)
+
+    return valid, invalid
+
+
 def load_links(
     path: Path, allowed_domains: Sequence[str] = ()
 ) -> tuple[list[str], list[InvalidLink]]:
     if not path.exists():
         raise ConfigurationError(f"Fichier d'URL introuvable : {path.name}")
 
-    valid: list[str] = []
-    invalid: list[InvalidLink] = []
-    seen: set[str] = set()
-
     with path.open("r", encoding="utf-8-sig") as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            value = raw_line.strip()
-            if not value or value.startswith("#"):
-                continue
-            try:
-                url = validate_url(value, allowed_domains)
-            except ValueError as exc:
-                invalid.append(InvalidLink(line_number, value, str(exc)))
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            valid.append(url)
+        return validate_link_entries(enumerate(handle, start=1), allowed_domains)
 
-    return valid, invalid
+
+def load_links_from_environment(
+    value: str, allowed_domains: Sequence[str] = ()
+) -> tuple[list[str], list[InvalidLink]]:
+    """Charge TARGET_URLS sous forme JSON ou avec une URL par ligne/point-virgule."""
+
+    raw = value.strip()
+    if not raw:
+        return [], []
+
+    if raw.startswith(("[", "{")):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError("TARGET_URLS contient un JSON invalide.") from exc
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, str) for item in parsed
+        ):
+            raise ConfigurationError(
+                "TARGET_URLS JSON doit être une liste de chaînes de caractères."
+            )
+        values = parsed
+    else:
+        values = re.split(r"[\r\n;]+", raw)
+
+    return validate_link_entries(enumerate(values, start=1), allowed_domains)
 
 
 def validate_proxy_server(server: str) -> str:
@@ -1144,9 +1177,17 @@ def main() -> int:
 
     try:
         try:
-            urls, invalid_links = load_links(
-                settings.links_file, settings.allowed_domains
-            )
+            target_urls = os.getenv("TARGET_URLS", "").strip()
+            if target_urls:
+                urls, invalid_links = load_links_from_environment(
+                    target_urls, settings.allowed_domains
+                )
+                LOGGER.info("URL chargées depuis TARGET_URLS.")
+            else:
+                urls, invalid_links = load_links(
+                    settings.links_file, settings.allowed_domains
+                )
+                LOGGER.info("URL chargées depuis %s.", settings.links_file.name)
             proxies, proxy_issues = load_proxy_configs(settings.proxies_file)
         except ConfigurationError as exc:
             store.add(
@@ -1191,7 +1232,9 @@ def main() -> int:
             LOGGER.warning("Proxy %s ignoré : %s", issue.name, issue.message)
 
         if not urls:
-            message = "Aucune URL valide n'a été trouvée dans links.txt."
+            message = (
+                "Aucune URL valide n'a été trouvée dans TARGET_URLS ou links.txt."
+            )
             store.add(
                 ResultRecord(
                     run_id=run_id,

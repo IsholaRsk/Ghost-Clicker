@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.render.example
 
 # Exports de fournisseurs pouvant contenir des identifiants
 rayobyte-proxies-*.txt

@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: ghost-clicker
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: RAYOBYTE_US_PROXY_SERVER
+        value: http://us-east.gw.rayobyte.com:8000
+      - key: RAYOBYTE_US_USERNAME
+        sync: false
+      - key: RAYOBYTE_US_PASSWORD
+        sync: false
+      - key: TARGET_URLS
+        sync: false
+      - key: ALLOWED_DOMAINS
+        sync: false
+      - key: HEADLESS
+        value: "true"
+      - key: PROXY_POOL_SIZE
+        value: "100"
+      - key: MAX_PROXIES_PER_RUN
+        value: "10"
+      - key: DELAY_BETWEEN_URLS_SECONDS
+        value: "3"
+      - key: PROXY_CHECK_TIMEOUT_MS
+        value: "20000"
+      - key: NAVIGATION_TIMEOUT_MS
+        value: "30000"
+      - key: IP_CHECK_URL
+        value: https://ipinfo.io/json
+      - key: RESULTS_DIR
+        value: /tmp/ghost-clicker-results
+      - key: PROXIES_FILE
+        value: /tmp/ghost-clicker-proxies.txt
+      - key: ZIP_CODES_FILE
+        value: /app/zip_codes_us.txt
+      - key: IGNORE_HTTPS_ERRORS
+        value: "false"
+      - key: MAX_DASHBOARD_ROWS
+        value: "2000"
