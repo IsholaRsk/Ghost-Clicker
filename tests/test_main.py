@@ -46,6 +46,25 @@ class UrlValidationTests(unittest.TestCase):
             self.assertEqual(len(invalid), 1)
             self.assertEqual(invalid[0].line_number, 4)
 
+    def test_loads_target_urls_from_json_or_semicolon_list(self):
+        json_urls, json_invalid = main.load_links_from_environment(
+            '["https://example.com/", "https://example.org/"]'
+        )
+        self.assertEqual(
+            json_urls, ["https://example.com/", "https://example.org/"]
+        )
+        self.assertFalse(json_invalid)
+
+        list_urls, list_invalid = main.load_links_from_environment(
+            "https://example.com/;https://example.org/"
+        )
+        self.assertEqual(list_urls, json_urls)
+        self.assertFalse(list_invalid)
+
+    def test_rejects_invalid_target_urls_json(self):
+        with self.assertRaises(main.ConfigurationError):
+            main.load_links_from_environment('{"url": "https://example.com/"}')
+
     def test_navigation_guard_blocks_private_redirect(self):
         class FakeRoute:
             def __init__(self):
