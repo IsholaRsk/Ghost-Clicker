@@ -252,7 +252,8 @@ def home() -> str:
   </div>
   <div class="notice">
     Modifiez les URL avec la variable Render <code>TARGET_URLS</code>, puis redéployez le service.
-    Stockage temporaire : les résultats disparaissent lors d'un redéploiement.
+    <code>ALLOWED_DOMAINS</code> est déduit automatiquement. Stockage temporaire : les résultats
+    disparaissent lors d'un redéploiement.
   </div>
   <p>Début : {html.escape(str(state['last_started'] or '—'))}<br>
      Fin : {html.escape(str(state['last_finished'] or '—'))}<br>
