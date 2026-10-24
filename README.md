@@ -9,6 +9,8 @@ Utilisez-le uniquement avec un abonnement proxy valide, sur des URL que vous êt
 ```text
 Ghost-Clicker/
 ├── main.py              # validation, proxys, Playwright et génération du dashboard
+├── generate_zip_pool.py # génère le pool US avec ZIP et sessions aléatoires
+├── zip_codes_us.txt     # liste non secrète de ZIP US autorisés pour le pool
 ├── links.txt            # URL à visiter, une par ligne
 ├── proxies.txt          # pays + noms des variables d’environnement (jamais les secrets)
 ├── .env.example         # modèle sans endpoint ni identifiant réel
@@ -32,14 +34,15 @@ Le programme suit cette séquence :
 1. charge `.env` avec `python-dotenv` ;
 2. valide les URL de `links.txt` (HTTP/HTTPS seulement, pas d’identifiants intégrés, pas d’adresse locale ou privée) ;
 3. lit `proxies.txt`, puis récupère les endpoints et identifiants dans les variables d’environnement ;
-4. lance Chromium avec `headless=False` par défaut ;
-5. crée un contexte de navigateur isolé pour chaque proxy ;
-6. ouvre le service `IP_CHECK_URL` via ce contexte, récupère l’IP et compare le pays détecté à `US` ou `CA` lorsqu’il est fourni ;
-7. ferme immédiatement le contexte si le proxy échoue ou si le pays ne correspond pas ;
-8. répartit chaque URL valide **une fois**, en round-robin, entre les proxys ayant réussi le contrôle ;
-9. suit les redirections normales, puis relève l’URL finale, le statut HTTP et la durée jusqu’à `domcontentloaded` ;
-10. ferme les contextes et Chromium, y compris lors d’une interruption ;
-11. ajoute les résultats au CSV et reconstruit le dashboard HTML.
+4. sélectionne aléatoirement dans le pool au maximum `MAX_PROXIES_PER_RUN` profils, sans jamais dépasser le nombre d’URL à visiter ;
+5. lance Chromium avec `headless=False` par défaut ;
+6. crée un contexte de navigateur isolé pour chaque profil sélectionné ;
+7. ouvre le service `IP_CHECK_URL` via ce contexte, récupère l’IP et compare le pays détecté à `US` lorsqu’il est fourni ;
+8. ferme immédiatement le contexte si le proxy échoue ou si le pays ne correspond pas ;
+9. répartit chaque URL valide **une fois**, en round-robin, entre les profils ayant réussi le contrôle ;
+10. suit les redirections normales, puis relève l’URL finale, le statut HTTP et la durée jusqu’à `domcontentloaded` ;
+11. ferme les contextes et Chromium, y compris lors d’une interruption ;
+12. ajoute les résultats au CSV et reconstruit le dashboard HTML.
 
 Un statut final HTTP compris entre 200 et 399 est compté comme une navigation réussie. Les tests proxy et erreurs de validation sont affichés séparément dans le dashboard.
 
@@ -107,12 +110,12 @@ Les sous-domaines de chaque domaine indiqué sont acceptés. N’ajoutez ni `htt
 
 ### `proxies.txt`
 
-Le fichier fourni est un CSV :
+Ce fichier CSV est généré par `generate_zip_pool.py`. Il ne contient que des références non secrètes :
 
 ```csv
 name,country,server_env,username_env,password_env
-rayobyte-us,US,RAYOBYTE_US_PROXY_SERVER,RAYOBYTE_US_USERNAME,RAYOBYTE_US_PASSWORD
-rayobyte-ca,CA,RAYOBYTE_CA_PROXY_SERVER,RAYOBYTE_CA_USERNAME,RAYOBYTE_CA_PASSWORD
+rayobyte-us-001-zip-10001,US,RAYOBYTE_US_PROXY_SERVER,RAYOBYTE_US_USERNAME,RAYOBYTE_US_POOL_PASSWORD_001
+rayobyte-us-002-zip-90210,US,RAYOBYTE_US_PROXY_SERVER,RAYOBYTE_US_USERNAME,RAYOBYTE_US_POOL_PASSWORD_002
 ```
 
 Les colonnes signifient :
@@ -136,6 +139,32 @@ protocole://hote_fourni_par_rayobyte:port_fourni_par_rayobyte
 ```
 
 Les protocoles acceptés sont `http`, `https` et `socks5`. Utilisez le protocole que Rayobyte indique réellement pour votre produit. Ne mettez jamais `utilisateur:mot_de_passe@` dans cette valeur.
+
+### `generate_zip_pool.py` et `zip_codes_us.txt`
+
+Le générateur utilise uniquement le ciblage ZIP, sans ASN. La forme générée, confirmée par l’exemple Rayobyte fourni, est :
+
+```text
+PASSWORD-country-US-zip-ZIP-session-SESSION
+```
+
+Les sessions comportent huit lettres minuscules ou chiffres et sont toutes uniques. Les ZIP ne sont pas tirés au hasard parmi `00000`–`99999`, car la majorité de ces nombres ne sont pas des codes valides : ils sont choisis et mélangés depuis `zip_codes_us.txt`.
+
+Emplacement de chaque information :
+
+- endpoint, utilisateur et mot de passe de base : `.env` ;
+- ZIP autorisés : `zip_codes_us.txt`, un code à cinq chiffres par ligne ;
+- mots de passe ciblés générés : bloc protégé dans `.env` ;
+- références aux profils : `proxies.txt` ;
+- URL à visiter : `links.txt`.
+
+Après avoir créé et rempli `.env`, générez 100 profils :
+
+```powershell
+python .\generate_zip_pool.py --size 100
+```
+
+Relancer cette commande remplace proprement l’ancien bloc généré avec de nouveaux ZIP mélangés et de nouvelles sessions. Aucun ASN n’est ajouté. Certains ZIP peuvent ne pas avoir d’inventaire Rayobyte au moment du test ; le contrôle proxy les refusera alors avant toute navigation.
 
 ### `.env.example` et `.env`
 
@@ -176,6 +205,7 @@ Réglages disponibles :
 | `ALLOWED_DOMAINS` | vide | Liste blanche facultative de domaines |
 | `IGNORE_HTTPS_ERRORS` | `false` | Ignore les erreurs TLS uniquement si explicitement nécessaire |
 | `MAX_DASHBOARD_ROWS` | `2000` | Limite d’affichage HTML ; le CSV reste complet |
+| `MAX_PROXIES_PER_RUN` | `10` | Maximum de profils choisis dans le pool par lancement |
 
 `ipinfo.io` est un service tiers avec ses propres limites et conditions. Vous pouvez remplacer `IP_CHECK_URL` par un service autorisé qui renvoie un objet JSON contenant une IP dans `ip`, `query` ou `origin`, et idéalement le pays dans `country`, `country_code` ou `countryCode`.
 

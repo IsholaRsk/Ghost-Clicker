@@ -1,3 +1,4 @@
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,12 +108,24 @@ class ProxyConfigurationTests(unittest.TestCase):
     def test_missing_environment_variable_is_a_safe_issue(self):
         proxies, issues = main.load_proxy_configs(Path("proxies.txt"), {})
         self.assertFalse(proxies)
-        self.assertEqual(len(issues), 2)
+        self.assertEqual(len(issues), 100)
         self.assertNotIn("password", " ".join(issue.message for issue in issues).lower())
 
     def test_proxy_server_rejects_embedded_credentials(self):
         with self.assertRaises(ValueError):
             main.validate_proxy_server("http://user:password@proxy.test:8080")
+
+    def test_selects_only_profiles_that_can_be_used_this_run(self):
+        proxies = [
+            main.ProxyConfig(f"proxy-{index}", "US", "http://proxy.test:8080")
+            for index in range(20)
+        ]
+        selected = main.select_proxy_configs(
+            proxies, max_proxies_per_run=10, url_count=3, rng=random.Random(42)
+        )
+        self.assertEqual(len(selected), 3)
+        self.assertEqual(len({proxy.name for proxy in selected}), 3)
+        self.assertTrue(all(proxy in proxies for proxy in selected))
 
 
 class ResultTests(unittest.TestCase):

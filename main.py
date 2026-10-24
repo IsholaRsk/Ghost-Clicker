@@ -13,6 +13,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -63,6 +64,7 @@ class Settings:
     allowed_domains: tuple[str, ...]
     ignore_https_errors: bool
     max_dashboard_rows: int
+    max_proxies_per_run: int
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,9 @@ def load_settings(base_dir: Path) -> Settings:
         ),
         max_dashboard_rows=parse_positive_int(
             os.getenv("MAX_DASHBOARD_ROWS"), 2_000, "MAX_DASHBOARD_ROWS", 100
+        ),
+        max_proxies_per_run=parse_positive_int(
+            os.getenv("MAX_PROXIES_PER_RUN"), 10, "MAX_PROXIES_PER_RUN", 1
         ),
     )
 
@@ -475,6 +480,23 @@ def load_proxy_configs(
                 )
 
     return proxies, issues
+
+
+def select_proxy_configs(
+    proxies: Sequence[ProxyConfig],
+    max_proxies_per_run: int,
+    url_count: int,
+    rng: Any | None = None,
+) -> list[ProxyConfig]:
+    """Sélectionne uniquement les profils qui pourront être utilisés ce lancement."""
+
+    if not proxies or url_count <= 0:
+        return []
+    selection_size = min(len(proxies), max_proxies_per_run, url_count)
+    if selection_size == len(proxies):
+        return list(proxies)
+    random_source = rng or random.SystemRandom()
+    return random_source.sample(list(proxies), selection_size)
 
 
 def redact_error(error: BaseException | str, secrets: Iterable[str] = ()) -> str:
@@ -1198,8 +1220,16 @@ def main() -> int:
             LOGGER.error(message)
             return 2
 
+        selected_proxies = select_proxy_configs(
+            proxies, settings.max_proxies_per_run, len(urls)
+        )
+        LOGGER.info(
+            "%d profil(s) sélectionné(s) aléatoirement sur %d configuré(s).",
+            len(selected_proxies),
+            len(proxies),
+        )
         workflow_successful = run_browser_workflow(
-            settings, proxies, urls, store, run_id
+            settings, selected_proxies, urls, store, run_id
         )
         if invalid_links or proxy_issues:
             workflow_successful = False
