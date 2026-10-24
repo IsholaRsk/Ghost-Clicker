@@ -14,6 +14,16 @@ class ZipPoolTests(unittest.TestCase):
             "secret-country-US",
         )
 
+    def test_country_password_prefix_accepts_raw_provider_password(self):
+        self.assertEqual(
+            generate_zip_pool.country_password_prefix("secret"),
+            "secret-country-US",
+        )
+
+    def test_country_password_prefix_rejects_another_country(self):
+        with self.assertRaises(generate_zip_pool.PoolConfigurationError):
+            generate_zip_pool.country_password_prefix("secret-country-CA")
+
     def test_generated_sessions_are_unique_and_documentation_compatible(self):
         sessions = set()
         rng = random.SystemRandom()

@@ -231,6 +231,11 @@ def load_settings(base_dir: Path) -> Settings:
     # Ce service est lui aussi une entrée réseau : on lui applique la même validation.
     ip_check_url = validate_url(ip_check_url)
 
+    allowed_domains = parse_allowed_domains(os.getenv("ALLOWED_DOMAINS"))
+    target_urls = os.getenv("TARGET_URLS", "").strip()
+    if not allowed_domains and target_urls:
+        allowed_domains = derive_allowed_domains(target_urls)
+
     return Settings(
         base_dir=base_dir,
         links_file=base_dir / os.getenv("LINKS_FILE", "links.txt"),
@@ -252,7 +257,7 @@ def load_settings(base_dir: Path) -> Settings:
             3.0,
             "DELAY_BETWEEN_URLS_SECONDS",
         ),
-        allowed_domains=parse_allowed_domains(os.getenv("ALLOWED_DOMAINS")),
+        allowed_domains=allowed_domains,
         ignore_https_errors=parse_bool(
             os.getenv("IGNORE_HTTPS_ERRORS"), False, "IGNORE_HTTPS_ERRORS"
         ),
@@ -403,6 +408,18 @@ def load_links_from_environment(
         values = re.split(r"[\r\n;]+", raw)
 
     return validate_link_entries(enumerate(values, start=1), allowed_domains)
+
+
+def derive_allowed_domains(target_urls: str) -> tuple[str, ...]:
+    """Déduit une liste blanche exacte depuis les URL Render valides."""
+
+    valid_targets, _invalid_targets = load_links_from_environment(target_urls)
+    hostnames: list[str] = []
+    for url in valid_targets:
+        hostname = urlsplit(url).hostname
+        if hostname and hostname.lower() not in hostnames:
+            hostnames.append(hostname.lower())
+    return tuple(hostnames)
 
 
 def validate_proxy_server(server: str) -> str:

@@ -65,6 +65,13 @@ class UrlValidationTests(unittest.TestCase):
         with self.assertRaises(main.ConfigurationError):
             main.load_links_from_environment('{"url": "https://example.com/"}')
 
+    def test_derives_render_allowlist_from_target_urls(self):
+        domains = main.derive_allowed_domains(
+            '["https://www.example.com/a", "https://example.org/b", '
+            '"https://www.example.com/c"]'
+        )
+        self.assertEqual(domains, ("www.example.com", "example.org"))
+
     def test_navigation_guard_blocks_private_redirect(self):
         class FakeRoute:
             def __init__(self):

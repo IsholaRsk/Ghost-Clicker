@@ -17,8 +17,6 @@ services:
         sync: false
       - key: TARGET_URLS
         sync: false
-      - key: ALLOWED_DOMAINS
-        sync: false
       - key: HEADLESS
         value: "true"
       - key: PROXY_POOL_SIZE

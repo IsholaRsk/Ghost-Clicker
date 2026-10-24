@@ -4,6 +4,10 @@ Ghost-Clicker est un outil Python pour **vérifier des proxys autorisés**, puis
 
 Utilisez-le uniquement avec un abonnement proxy valide, sur des URL que vous êtes autorisé à consulter, à une cadence conforme aux conditions de Rayobyte et des sites visités.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/IsholaRsk/Ghost-Clicker)
+
+**Déploiement rapide :** cliquez sur le bouton, saisissez seulement l’utilisateur Rayobyte, le mot de passe Rayobyte brut et les URL cibles. Render configure automatiquement le serveur, Chromium headless, le token administrateur et le pool ZIP.
+
 ## 1. Architecture
 
 ```text
@@ -237,17 +241,23 @@ Les identifiants et mots de passe ne sont jamais écrits dans le CSV ou le dashb
 
 ## 5. Déploiement sur Render
 
+Le guide condensé est disponible dans [`DEPLOY_RENDER.md`](DEPLOY_RENDER.md).
+
 Le dépôt contient un Blueprint `render.yaml` et un `Dockerfile` fondé sur l’image officielle Playwright. Sur Render, Chromium fonctionne obligatoirement avec `HEADLESS=true` : le navigateur n’est pas visible dans un conteneur cloud.
 
-1. Dans Render, choisissez **New → Blueprint** et connectez ce dépôt GitHub.
-2. Render détecte `render.yaml` et crée le Web Service.
-3. Dans **Environment**, renseignez les variables marquées `sync: false` :
+### Déploiement en un clic
+
+1. Cliquez sur **Deploy to Render** en haut de ce README.
+2. Autorisez Render à accéder au dépôt, puis confirmez la création du Blueprint.
+3. Render ne demande que trois valeurs :
    - `RAYOBYTE_US_USERNAME` : nouvel utilisateur Rayobyte ;
-   - `RAYOBYTE_US_PASSWORD` : mot de passe complet se terminant par `-country-US` ;
-   - `TARGET_URLS` : URL définitives, au format JSON ou une URL par ligne ;
-   - `ALLOWED_DOMAINS` : domaines correspondants sans protocole.
-4. `ADMIN_TOKEN` est généré automatiquement par Render. L’interface utilise HTTP Basic avec l’utilisateur `admin` et ce token comme mot de passe.
-5. Déployez, ouvrez l’URL Render, connectez-vous et cliquez sur **Lancer le contrôle**.
+   - `RAYOBYTE_US_PASSWORD` : mot de passe brut Rayobyte (`-country-US` est ajouté automatiquement) ;
+   - `TARGET_URLS` : URL définitives, au format JSON ou une URL par ligne.
+4. Attendez la fin du build Docker, puis ouvrez l’URL du service.
+5. Connectez-vous avec l’utilisateur `admin` et la valeur de `ADMIN_TOKEN` visible dans **Render → Environment**.
+6. Cliquez sur **Lancer le contrôle**.
+
+Alternative : dans Render, choisissez **New → Blueprint**, connectez ce dépôt et sélectionnez `render.yaml`.
 
 Exemple recommandé pour `TARGET_URLS` :
 
@@ -255,13 +265,13 @@ Exemple recommandé pour `TARGET_URLS` :
 ["https://site1.example/", "https://site2.example/page"]
 ```
 
-Exemple pour `ALLOWED_DOMAINS` :
+`ALLOWED_DOMAINS` est automatiquement déduit des URL valides. Vous pouvez néanmoins l’ajouter manuellement dans Render pour imposer une liste plus stricte :
 
 ```text
 site1.example,site2.example
 ```
 
-Pour modifier les URL, changez `TARGET_URLS` et `ALLOWED_DOMAINS` dans **Render → Environment**, puis lancez un redéploiement. Le pool ZIP est généré directement en mémoire au démarrage à partir des secrets Render : aucun fichier `.env` secret n’entre dans l’image Docker.
+Pour modifier les URL, changez uniquement `TARGET_URLS` dans **Render → Environment**, puis lancez **Manual Deploy → Deploy latest commit**. Le pool ZIP est généré directement en mémoire au démarrage à partir des secrets Render : aucun fichier `.env` secret n’entre dans l’image Docker.
 
 Ce déploiement utilise volontairement un stockage temporaire (`/tmp/ghost-clicker-results`). Le CSV et le dashboard peuvent disparaître lors d’un redémarrage, d’une mise en veille ou d’un redéploiement. Utilisez un Persistent Disk si vous souhaitez conserver l’historique.
 

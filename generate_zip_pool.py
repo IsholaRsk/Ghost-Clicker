@@ -68,15 +68,22 @@ def load_zip_codes(path: Path) -> list[str]:
 
 
 def country_password_prefix(password: str) -> str:
-    """Conserve le secret et le ciblage US, retire d'anciens sélecteurs après US."""
+    """Ajoute le ciblage US s'il manque et retire les anciens sélecteurs."""
+
+    value = password.strip()
+    if not value:
+        raise PoolConfigurationError("RAYOBYTE_US_PASSWORD est vide.")
+
+    country_match = re.search(r"-country-([A-Za-z]{2})(?:-|$)", value)
+    if country_match and country_match.group(1).upper() != "US":
+        raise PoolConfigurationError(
+            "RAYOBYTE_US_PASSWORD contient un ciblage pays différent de US."
+        )
 
     marker = "-country-US"
-    position = password.rfind(marker)
-    if position < 1:
-        raise PoolConfigurationError(
-            "RAYOBYTE_US_PASSWORD doit contenir le ciblage exact -country-US."
-        )
-    return password[: position + len(marker)]
+    if country_match:
+        return f"{value[: country_match.start()]}{marker}"
+    return f"{value}{marker}"
 
 
 def make_session(existing: set[str], rng: random.SystemRandom) -> str:
