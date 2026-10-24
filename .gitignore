@@ -1,0 +1,25 @@
+# Secrets locaux
+.env
+.env.*
+!.env.example
+
+# Environnements et caches Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Résultats générés localement
+results/*
+!results/.gitkeep
+
+# IDE et système
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

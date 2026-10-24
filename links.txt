@@ -1,0 +1,3 @@
+# Une URL HTTP(S) publique par ligne. Les lignes vides et commentaires sont ignorés.
+https://example.com/
+https://example.org/
