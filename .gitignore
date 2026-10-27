@@ -1,27 +1,18 @@
-# Secrets locaux
+# Secrets
 .env
 .env.*
 !.env.example
-!.env.render.example
 
-# Exports de fournisseurs pouvant contenir des identifiants
-rayobyte-proxies-*.txt
-proxy-exports/
-
-# Environnements et caches Python
+# Python
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
 
-# Résultats générés localement
-results/*
-!results/.gitkeep
+# Paramètres/résultats locaux
+*.local.json
 
 # IDE et système
 .vscode/

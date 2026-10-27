@@ -1,5 +1,4 @@
 .git
-.gitignore
 .env
 .env.*
 !.env.example
@@ -10,7 +9,3 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .mypy_cache
-results/*
-!results/.gitkeep
-proxy-exports
-rayobyte-proxies-*.txt
