@@ -1,91 +1,172 @@
-"""Interface Render minimale pour lancer Ghost-Clicker et consulter les résultats."""
+"""Interface web Docker : paramètres éphémères, exécution manuelle et planifiée."""
 
 from __future__ import annotations
 
+import csv
 import hmac
 import html
+import io
+import json
 import os
+import secrets
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, Response, redirect, request, send_file, url_for
 
-from generate_zip_pool import PoolConfigurationError, populate_runtime_pool
 from main import (
+    BrowserSettings,
     ConfigurationError,
-    ResultStore,
-    load_links_from_environment,
-    main as run_ghost_clicker,
+    Target,
+    load_browser_settings,
+    run_targets,
+    validate_button_text,
+    validate_public_url,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 APP = Flask(__name__)
-app = APP  # Nom conventionnel utilisé par Gunicorn.
+app = APP
+CSRF_TOKEN = secrets.token_urlsafe(32)
 STATE_LOCK = threading.Lock()
 RUN_STATE: dict[str, Any] = {
     "running": False,
-    "last_started": "",
-    "last_finished": "",
-    "last_exit_code": None,
+    "source": "",
+    "started_at": "",
+    "finished_at": "",
     "last_error": "",
+    "next_run_at": "",
 }
-RUNTIME_ERROR = ""
+
+DEFAULT_APP_SETTINGS: dict[str, Any] = {
+    "targets": [],
+    "schedule_enabled": False,
+    "interval_minutes": 60,
+}
 
 
-def _path_from_env(variable: str, default: str) -> Path:
-    value = os.getenv(variable, default)
-    path = Path(value)
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def storage_path(variable: str, default: str) -> Path:
+    path = Path(os.getenv(variable, default))
     return path if path.is_absolute() else BASE_DIR / path
 
 
-def _positive_int(variable: str, default: int, maximum: int) -> int:
-    raw = os.getenv(variable, str(default)).strip()
+def settings_path() -> Path:
+    return storage_path("SETTINGS_FILE", "/tmp/ghost-clicker-settings.json")
+
+
+def reports_path() -> Path:
+    return storage_path("REPORTS_FILE", "/tmp/ghost-clicker-reports.json")
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def load_app_settings() -> dict[str, Any]:
+    path = settings_path()
+    if not path.exists():
+        return dict(DEFAULT_APP_SETTINGS)
     try:
-        value = int(raw)
-    except ValueError as exc:
-        raise PoolConfigurationError(f"{variable} doit être un entier.") from exc
-    if not 1 <= value <= maximum:
-        raise PoolConfigurationError(
-            f"{variable} doit être compris entre 1 et {maximum}."
-        )
-    return value
-
-
-def prepare_runtime_pool() -> None:
-    """Génère les mots de passe ciblés en mémoire à partir des secrets Render."""
-
-    global RUNTIME_ERROR
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_APP_SETTINGS)
+    if not isinstance(value, dict):
+        return dict(DEFAULT_APP_SETTINGS)
     try:
-        pool_size = _positive_int("PROXY_POOL_SIZE", 100, 500)
-        distribution = populate_runtime_pool(
-            os.environ,
-            _path_from_env("ZIP_CODES_FILE", "zip_codes_us.txt"),
-            _path_from_env("PROXIES_FILE", "proxies.txt"),
-            pool_size,
+        interval = int(value.get("interval_minutes", 60))
+    except (TypeError, ValueError):
+        interval = 60
+    return {
+        "targets": value.get("targets", []),
+        "schedule_enabled": bool(value.get("schedule_enabled", False)),
+        "interval_minutes": max(60, min(interval, 10_080)),
+    }
+
+
+def save_app_settings(value: dict[str, Any]) -> None:
+    atomic_write_json(settings_path(), value)
+
+
+def load_reports() -> list[dict[str, Any]]:
+    path = reports_path()
+    if not path.exists():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def append_report(value: dict[str, Any]) -> None:
+    reports = load_reports()
+    reports.append(value)
+    atomic_write_json(reports_path(), reports[-200:])
+
+
+def targets_from_settings(
+    value: dict[str, Any], browser_settings: BrowserSettings
+) -> list[Target]:
+    targets: list[Target] = []
+    raw_targets = value.get("targets", [])
+    if not isinstance(raw_targets, list):
+        raise ConfigurationError("La liste enregistrée est invalide.")
+    if len(raw_targets) > 50:
+        raise ConfigurationError("Maximum : 50 URL.")
+    for item in raw_targets:
+        if not isinstance(item, dict):
+            raise ConfigurationError("Une entrée enregistrée est invalide.")
+        targets.append(
+            Target(
+                url=validate_public_url(
+                    str(item.get("url", "")), browser_settings.allowed_domains
+                ),
+                button_text=validate_button_text(str(item.get("button_text", ""))),
+            )
         )
-        RUNTIME_ERROR = ""
-        APP.logger.info(
-            "Pool Render prêt : %d profils, %d ZIP distincts, aucun ASN.",
-            pool_size,
-            len(distribution),
+    return targets
+
+
+def parse_targets_text(value: str, browser_settings: BrowserSettings) -> list[Target]:
+    targets: list[Target] = []
+    for line_number, raw_line in enumerate(value.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" not in line:
+            raise ConfigurationError(
+                f"Ligne {line_number} : utilisez le format URL | texte du bouton."
+            )
+        url, button_text = line.split("|", maxsplit=1)
+        targets.append(
+            Target(
+                url=validate_public_url(url, browser_settings.allowed_domains),
+                button_text=validate_button_text(button_text),
+            )
         )
-    except PoolConfigurationError as exc:
-        # Le service reste accessible afin d'afficher le diagnostic de configuration.
-        RUNTIME_ERROR = str(exc)
-        APP.logger.warning("Pool Render non initialisé : %s", RUNTIME_ERROR)
+    if len(targets) > 50:
+        raise ConfigurationError("Maximum : 50 URL.")
+    return targets
 
 
-def _results_dir() -> Path:
-    return _path_from_env("RESULTS_DIR", "results")
-
-
-def ensure_dashboard() -> Path:
-    store = ResultStore(_results_dir())
-    if not store.dashboard_path.exists():
-        store.render_dashboard()
-    return store.dashboard_path
+def targets_to_text(value: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for item in value.get("targets", []):
+        if isinstance(item, dict):
+            lines.append(f"{item.get('url', '')} | {item.get('button_text', '')}")
+    return "\n".join(lines)
 
 
 def _authorized() -> bool:
@@ -104,7 +185,7 @@ def require_authentication() -> Response | None:
         return None
     if not os.getenv("ADMIN_TOKEN", ""):
         return Response(
-            "ADMIN_TOKEN n'est pas configuré dans Render.",
+            "ADMIN_TOKEN n'est pas configuré.",
             status=503,
             content_type="text/plain; charset=utf-8",
         )
@@ -118,147 +199,290 @@ def require_authentication() -> Response | None:
     )
 
 
-@APP.get("/health")
-def health() -> Response:
-    status = "degraded" if RUNTIME_ERROR else "ok"
-    return Response(f"{status}\n", content_type="text/plain; charset=utf-8")
+def require_csrf() -> None:
+    supplied = request.form.get("csrf_token", "")
+    if not hmac.compare_digest(supplied, CSRF_TOKEN):
+        raise ConfigurationError("Jeton de formulaire invalide. Rechargez la page.")
 
 
-def _run_in_background() -> None:
-    with STATE_LOCK:
-        RUN_STATE.update(
-            running=True,
-            last_started=datetime.now().astimezone().isoformat(timespec="seconds"),
-            last_finished="",
-            last_exit_code=None,
-            last_error="",
-        )
+def read_browser_configuration() -> tuple[BrowserSettings | None, str]:
     try:
-        exit_code = run_ghost_clicker()
+        return load_browser_settings(BASE_DIR), ""
+    except ConfigurationError as exc:
+        return None, str(exc)
+
+
+def execute_job(source: str) -> None:
+    try:
+        browser_settings = load_browser_settings(BASE_DIR)
+        app_settings = load_app_settings()
+        targets = targets_from_settings(app_settings, browser_settings)
+        if not targets:
+            raise ConfigurationError("Aucune URL n'est enregistrée.")
+        report = run_targets(browser_settings, targets)
+        value = report.to_dict()
+        value["source"] = source
+        append_report(value)
         with STATE_LOCK:
-            RUN_STATE["last_exit_code"] = exit_code
-    except Exception as exc:  # Dernier rempart autour du thread web.
+            RUN_STATE["last_error"] = report.error
+    except Exception as exc:
         with STATE_LOCK:
-            RUN_STATE["last_error"] = type(exc).__name__
-        APP.logger.exception("Exécution web interrompue.")
+            RUN_STATE["last_error"] = str(exc)[:500]
     finally:
         with STATE_LOCK:
             RUN_STATE["running"] = False
-            RUN_STATE["last_finished"] = datetime.now().astimezone().isoformat(
-                timespec="seconds"
+            RUN_STATE["finished_at"] = now_iso()
+
+
+def start_job(source: str) -> bool:
+    with STATE_LOCK:
+        if RUN_STATE["running"]:
+            return False
+        RUN_STATE.update(
+            running=True,
+            source=source,
+            started_at=now_iso(),
+            finished_at="",
+            last_error="",
+        )
+    thread = threading.Thread(target=execute_job, args=(source,), daemon=True)
+    thread.start()
+    return True
+
+
+def scheduler_loop() -> None:
+    next_run_timestamp: float | None = None
+    while True:
+        app_settings = load_app_settings()
+        enabled = bool(app_settings.get("schedule_enabled", False))
+        interval = max(60, int(app_settings.get("interval_minutes", 60)))
+        now = time.time()
+
+        if not enabled:
+            next_run_timestamp = None
+            with STATE_LOCK:
+                RUN_STATE["next_run_at"] = ""
+        else:
+            if next_run_timestamp is None:
+                next_run_timestamp = now + interval * 60
+            if now >= next_run_timestamp:
+                start_job("planifié")
+                next_run_timestamp = now + interval * 60
+            with STATE_LOCK:
+                RUN_STATE["next_run_at"] = datetime.fromtimestamp(
+                    next_run_timestamp
+                ).astimezone().isoformat(timespec="seconds")
+        time.sleep(15)
+
+
+@APP.get("/health")
+def health() -> Response:
+    _settings, error = read_browser_configuration()
+    status = "degraded" if error else "ok"
+    return Response(f"{status}\n", content_type="text/plain; charset=utf-8")
+
+
+@APP.post("/settings")
+def update_settings() -> Response:
+    try:
+        require_csrf()
+        browser_settings = load_browser_settings(BASE_DIR)
+        targets = parse_targets_text(
+            request.form.get("targets", ""), browser_settings
+        )
+        raw_interval = request.form.get("interval_minutes", "60").strip()
+        try:
+            interval = int(raw_interval)
+        except ValueError as exc:
+            raise ConfigurationError("L'intervalle doit être un entier.") from exc
+        if not 60 <= interval <= 10_080:
+            raise ConfigurationError(
+                "L'intervalle doit être compris entre 60 et 10080 minutes."
             )
+        save_app_settings(
+            {
+                "targets": [
+                    {"url": target.url, "button_text": target.button_text}
+                    for target in targets
+                ],
+                "schedule_enabled": request.form.get("schedule_enabled") == "on",
+                "interval_minutes": interval,
+            }
+        )
+        return redirect(url_for("home", saved="1"), code=303)
+    except ConfigurationError as exc:
+        return redirect(url_for("home", error=str(exc)), code=303)
 
 
 @APP.post("/run")
-def start_run() -> Response:
-    if RUNTIME_ERROR:
-        return Response(
-            f"Configuration incomplète : {RUNTIME_ERROR}",
-            status=503,
-            content_type="text/plain; charset=utf-8",
+def run_now() -> Response:
+    try:
+        require_csrf()
+        browser_settings = load_browser_settings(BASE_DIR)
+        targets = targets_from_settings(load_app_settings(), browser_settings)
+        if not targets:
+            raise ConfigurationError("Enregistrez au moins une URL.")
+        started = start_job("manuel")
+        return redirect(
+            url_for("home", started="1" if started else "0"), code=303
         )
-    if not os.getenv("TARGET_URLS", "").strip():
-        return Response(
-            "TARGET_URLS est vide dans Render.",
-            status=400,
-            content_type="text/plain; charset=utf-8",
-        )
-
-    with STATE_LOCK:
-        if RUN_STATE["running"]:
-            return redirect(url_for("home"), code=303)
-        RUN_STATE["running"] = True
-
-    thread = threading.Thread(target=_run_in_background, daemon=True)
-    thread.start()
-    return redirect(url_for("home"), code=303)
+    except ConfigurationError as exc:
+        return redirect(url_for("home", error=str(exc)), code=303)
 
 
-@APP.get("/dashboard")
-def dashboard() -> Response:
-    response = send_file(ensure_dashboard(), mimetype="text/html")
-    response.headers["Cache-Control"] = "no-store"
-    return response
+@APP.post("/clear-results")
+def clear_results() -> Response:
+    try:
+        require_csrf()
+        path = reports_path()
+        if path.exists():
+            path.unlink()
+        return redirect(url_for("home", cleared="1"), code=303)
+    except ConfigurationError as exc:
+        return redirect(url_for("home", error=str(exc)), code=303)
 
 
 @APP.get("/results.csv")
-def results_csv() -> Response:
-    path = _results_dir() / "results.csv"
-    if not path.exists():
-        return Response(
-            "Aucun CSV disponible. Lancez d'abord une exécution.",
-            status=404,
-            content_type="text/plain; charset=utf-8",
-        )
-    return send_file(path, mimetype="text/csv", as_attachment=True)
+def download_results() -> Response:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "source",
+            "date",
+            "ip_sortie",
+            "pays",
+            "url_initiale",
+            "texte_bouton",
+            "url_finale",
+            "statut_initial",
+            "statut_final",
+            "succes",
+            "erreur",
+            "duree_ms",
+        ]
+    )
+    for report in load_reports():
+        for result in report.get("results", []):
+            writer.writerow(
+                [
+                    report.get("source", ""),
+                    result.get("started_at", ""),
+                    report.get("exit_ip", ""),
+                    report.get("proxy_country", ""),
+                    result.get("initial_url", ""),
+                    result.get("button_text", ""),
+                    result.get("final_url", ""),
+                    result.get("initial_status", ""),
+                    result.get("final_status", ""),
+                    result.get("success", False),
+                    result.get("error", ""),
+                    result.get("duration_ms", ""),
+                ]
+            )
+    return Response(
+        output.getvalue(),
+        content_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=ghost-clicker-results.csv"},
+    )
+
+
+def render_result_rows(reports: list[dict[str, Any]]) -> str:
+    rows: list[str] = []
+    for report in reversed(reports):
+        for result in reversed(report.get("results", [])):
+            success = bool(result.get("success"))
+            css_class = "success" if success else "failure"
+            label = "SUCCÈS" if success else "ÉCHEC"
+            rows.append(
+                f"""
+                <tr>
+                  <td>{html.escape(str(result.get('started_at', '')))}</td>
+                  <td>{html.escape(str(report.get('source', '')))}</td>
+                  <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
+                  <td>{html.escape(str(result.get('button_text', '')))}</td>
+                  <td class="url">{html.escape(str(result.get('final_url', '')))}</td>
+                  <td><span class="badge {css_class}">{label}</span></td>
+                  <td class="error">{html.escape(str(result.get('error', '')))}</td>
+                </tr>"""
+            )
+    return "".join(rows) or '<tr><td colspan="7" class="empty">Aucun résultat.</td></tr>'
 
 
 @APP.get("/")
 def home() -> str:
+    app_settings = load_app_settings()
+    browser_settings, configuration_error = read_browser_configuration()
+    reports = load_reports()
     with STATE_LOCK:
         state = dict(RUN_STATE)
 
-    running = bool(state["running"])
-    if running:
-        status_label = "Exécution en cours"
-        status_class = "running"
-    elif state["last_exit_code"] == 0:
-        status_label = "Dernière exécution réussie"
-        status_class = "success"
-    elif state["last_exit_code"] is not None or state["last_error"]:
-        status_label = "Dernière exécution avec erreur"
-        status_class = "failure"
-    else:
-        status_label = "En attente"
-        status_class = "idle"
+    messages: list[str] = []
+    if request.args.get("saved") == "1":
+        messages.append("Paramètres enregistrés.")
+    if request.args.get("started") == "1":
+        messages.append("Exécution démarrée.")
+    if request.args.get("started") == "0":
+        messages.append("Une exécution est déjà en cours.")
+    if request.args.get("cleared") == "1":
+        messages.append("Résultats effacés.")
+    if request.args.get("error"):
+        messages.append(request.args["error"][:500])
+    if configuration_error:
+        messages.append(f"Configuration serveur : {configuration_error}")
+    if state["last_error"]:
+        messages.append(f"Dernière erreur : {state['last_error']}")
 
-    target_value = os.getenv("TARGET_URLS", "").strip()
-    try:
-        target_count = len(load_links_from_environment(target_value)[0])
-    except ConfigurationError:
-        target_count = 0
-    runtime_message = html.escape(RUNTIME_ERROR) if RUNTIME_ERROR else "Pool prêt"
-    disabled = " disabled" if running or RUNTIME_ERROR or not target_value else ""
-    refresh = '<meta http-equiv="refresh" content="4">' if running else ""
+    status = "Exécution en cours" if state["running"] else "En attente"
+    refresh = '<meta http-equiv="refresh" content="5">' if state["running"] else ""
+    disabled = " disabled" if state["running"] or configuration_error else ""
+    message_html = "".join(
+        f'<div class="notice">{html.escape(message)}</div>' for message in messages
+    )
+    checked = " checked" if app_settings.get("schedule_enabled") else ""
+    targets_text = html.escape(targets_to_text(app_settings))
+    interval = int(app_settings.get("interval_minutes", 60))
+    allowed = (
+        ", ".join(browser_settings.allowed_domains)
+        if browser_settings is not None
+        else "non configuré"
+    )
 
     return f"""<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  {refresh}<title>Ghost-Clicker — Render</title>
-  <style>
-    :root{{--bg:#07111f;--panel:#102238;--text:#ecf4fb;--muted:#94a9bf;--accent:#56e0c3;--red:#ff7180;--blue:#72aaff}}
-    *{{box-sizing:border-box}} body{{margin:0;background:radial-gradient(circle at 10% 0,#163957,var(--bg) 38%);color:var(--text);font:15px/1.55 Segoe UI,Arial,sans-serif;min-height:100vh}}
-    main{{max-width:900px;margin:auto;padding:40px 22px}} h1{{font-size:34px;margin:0}} h1 span{{color:var(--accent)}} p{{color:var(--muted)}}
-    .grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:28px 0}} .card{{padding:20px;background:linear-gradient(145deg,#132b45,var(--panel));border:1px solid #29425d;border-radius:16px}}
-    .card small{{color:var(--muted);display:block;text-transform:uppercase;letter-spacing:.7px}} .card strong{{font-size:22px;display:block;margin-top:8px;word-break:break-word}}
-    .status{{display:inline-block;padding:6px 10px;border-radius:99px;font-weight:700}} .running{{color:#ffd374;background:#ffd37418}} .success{{color:var(--accent);background:#56e0c318}} .failure{{color:var(--red);background:#ff718018}} .idle{{color:#aac2dc;background:#aac2dc18}}
-    .actions{{display:flex;gap:12px;flex-wrap:wrap}} button,a.button{{border:0;border-radius:10px;padding:12px 17px;font-weight:750;text-decoration:none;cursor:pointer}} button{{background:var(--accent);color:#06141e}} button:disabled{{opacity:.4;cursor:not-allowed}} a.button{{background:var(--blue);color:#07111f}} a.secondary{{background:#1b334c;color:var(--text)}}
-    .notice{{margin-top:22px;padding:15px;border-left:3px solid var(--blue);background:#102238;color:var(--muted)}} code{{color:#baf7eb}} @media(max-width:650px){{.grid{{grid-template-columns:1fr}}}}
-  </style>
-</head>
-<body><main>
-  <h1>Ghost<span>Clicker</span></h1>
-  <p>Contrôle manuel des proxys et des URL configurées dans Render.</p>
-  <div class="grid">
-    <section class="card"><small>État</small><strong><span class="status {status_class}">{status_label}</span></strong></section>
-    <section class="card"><small>URL configurées</small><strong>{target_count}</strong></section>
-    <section class="card"><small>Pool</small><strong>{runtime_message}</strong></section>
-  </div>
-  <div class="actions">
-    <form method="post" action="{url_for('start_run')}"><button type="submit"{disabled}>Lancer le contrôle</button></form>
-    <a class="button" href="{url_for('dashboard')}">Voir le dashboard</a>
-    <a class="button secondary" href="{url_for('results_csv')}">Télécharger le CSV</a>
-  </div>
-  <div class="notice">
-    Modifiez les URL avec la variable Render <code>TARGET_URLS</code>, puis redéployez le service.
-    <code>ALLOWED_DOMAINS</code> est déduit automatiquement. Stockage temporaire : les résultats
-    disparaissent lors d'un redéploiement.
-  </div>
-  <p>Début : {html.escape(str(state['last_started'] or '—'))}<br>
-     Fin : {html.escape(str(state['last_finished'] or '—'))}<br>
-     Code de sortie : {html.escape(str(state['last_exit_code']) if state['last_exit_code'] is not None else '—')}</p>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{refresh}<title>Ghost-Clicker</title><style>
+:root{{--bg:#07111f;--panel:#10243a;--line:#29445f;--text:#eef5fb;--muted:#93a9c0;--accent:#55dfc1;--blue:#75aaff;--red:#ff7583}}
+*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 8% 0,#173d5e,var(--bg) 38%);color:var(--text);font:14px/1.55 Segoe UI,Arial,sans-serif;min-height:100vh}}
+main{{max-width:1200px;margin:auto;padding:30px 20px}}h1{{font-size:32px;margin:0}}h1 span{{color:var(--accent)}}p{{color:var(--muted)}}
+.grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.card{{background:linear-gradient(145deg,#132c47,var(--panel));border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}}
+label{{display:block;font-weight:700;margin:11px 0 5px}}textarea,input[type=number]{{width:100%;background:#081827;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px;font:inherit}}textarea{{min-height:190px;resize:vertical}}
+button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15px;margin:8px 8px 0 0;font-weight:750;text-decoration:none;cursor:pointer}}button{{background:var(--accent);color:#06141d}}button.secondary,a.button{{background:var(--blue);color:#07111f}}button.danger{{background:var(--red)}}button:disabled{{opacity:.4;cursor:not-allowed}}
+.notice{{padding:11px 14px;margin:10px 0;border-left:3px solid var(--blue);background:#10243a;color:#dce8f4}}code{{color:#b6f7e8}}.meta{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.meta div{{background:#0b1b2b;padding:12px;border-radius:10px}}.meta small{{display:block;color:var(--muted)}}
+.table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
+@media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
+</style></head><body><main>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy, un clic explicite par URL, puis attente de redirection.</p>
+{message_html}
+<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Domaines autorisés</small><strong>{html.escape(allowed)}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
+<div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
+<form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
+<label for="targets">Une ligne par visite : URL | texte exact du bouton</label>
+<textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer">{targets_text}</textarea>
+<label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
+<label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
+<button type="submit"{disabled}>Enregistrer</button></form></section>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Chaque entrée reçoit au maximum un clic sur un bouton dont le texte correspond exactement.</p>
+<form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{disabled}>Lancer maintenant</button></form>
+<a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
+<form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
+<p>Les paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
+<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>URL initiale</th><th>Bouton</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
 </main></body></html>"""
 
 
-prepare_runtime_pool()
+scheduler = threading.Thread(target=scheduler_loop, daemon=True)
+scheduler.start()
+
+
+if __name__ == "__main__":
+    APP.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)

@@ -2,8 +2,7 @@ FROM mcr.microsoft.com/playwright/python:v1.64.1-noble
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HEADLESS=true \
-    RESULTS_DIR=/tmp/ghost-clicker-results
+    HEADLESS=true
 
 WORKDIR /app
 
