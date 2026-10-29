@@ -1,38 +1,59 @@
 import random
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import main
 
 
-class ValidationTests(unittest.TestCase):
-    def test_accepts_authorized_public_url(self):
-        self.assertEqual(
-            main.validate_public_url(
-                "https://www.example.com/page", ("example.com",)
+def make_settings(proxies=None):
+    return main.BrowserSettings(
+        proxies=proxies
+        or (
+            main.ProxyConfig(
+                "proxy-001",
+                "http://proxy-one.example:8000",
+                "SENSITIVE_USER_MARKER",
+                "SENSITIVE_PASSWORD_MARKER",
             ),
-            "https://www.example.com/page",
-        )
+            main.ProxyConfig(
+                "proxy-002",
+                "http://proxy-two.example:8001",
+                "SECOND_USER_MARKER",
+                "SECOND_PASSWORD_MARKER",
+            ),
+        ),
+        ip_check_url="https://ipinfo.io/json",
+        headless=True,
+        navigation_timeout_ms=30_000,
+        click_timeout_ms=15_000,
+        redirect_timeout_ms=30_000,
+        wait_after_redirect_seconds=0,
+        delay_between_targets_seconds=0,
+    )
 
-    def test_rejects_unauthorized_or_private_urls(self):
+
+class ValidationTests(unittest.TestCase):
+    def test_accepts_public_urls_from_unrelated_domains(self):
+        for value in (
+            "https://www.example.com/page",
+            "https://unrelated.example.org/other",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(main.validate_public_url(value), value)
+
+    def test_rejects_private_local_or_unsafe_urls(self):
         values = [
-            "https://example.org/",
             "http://127.0.0.1/",
             "http://192.168.1.1/",
             "http://localhost/",
             "file:///tmp/test",
-            "https://user:password@example.com/",
+            "https://embedded-user:embedded-pass@example.com/",
         ]
         for value in values:
             with self.subTest(value=value), self.assertRaises(main.ConfigurationError):
-                main.validate_public_url(value, ("example.com",))
-
-    def test_requires_a_domain_allowlist(self):
-        with self.assertRaises(main.ConfigurationError):
-            main.parse_allowed_domains("")
-        self.assertEqual(
-            main.parse_allowed_domains("example.com,www.example.org"),
-            ("example.com", "www.example.org"),
-        )
+                main.validate_public_url(value)
 
     def test_validates_button_text(self):
         self.assertEqual(main.validate_button_text(" Continuer "), "Continuer")
@@ -45,76 +66,87 @@ class ValidationTests(unittest.TestCase):
             "http://proxy.test:8000",
         )
         with self.assertRaises(main.ConfigurationError):
-            main.validate_proxy_server("http://user:password@proxy.test:8000")
-
-    def test_parses_secret_proxy_list_json(self):
-        proxies = main.parse_proxy_list_json(
-            '[{"name":"us-1","server":"http://proxy.test:8000",'
-            '"username":"user-1","password":"password-1"},'
-            '{"name":"us-2","server":"http://proxy.test:8001",'
-            '"username":"user-2","password":"password-2"}]'
-        )
-        self.assertEqual(len(proxies), 2)
-        self.assertEqual(proxies[0].name, "us-1")
-        self.assertEqual(proxies[1].server, "http://proxy.test:8001")
-
-    def test_rejects_duplicate_proxy_names(self):
-        with self.assertRaises(main.ConfigurationError):
-            main.parse_proxy_list_json(
-                '[{"name":"same","server":"http://proxy.test:8000"},'
-                '{"name":"same","server":"http://proxy.test:8001"}]'
+            main.validate_proxy_server(
+                "http://embedded-user:embedded-pass@proxy.test:8000"
             )
 
 
-class SecurityTests(unittest.TestCase):
-    def make_settings(self):
-        return main.BrowserSettings(
-            proxies=(
-                main.ProxyConfig(
-                    "proxy-1",
-                    "http://proxy.test:8000",
-                    "private-user",
-                    "private-password",
-                ),
-                main.ProxyConfig(
-                    "proxy-2",
-                    "http://proxy.test:8001",
-                    "second-user",
-                    "second-password",
-                ),
-            ),
-            ip_check_url="https://ipinfo.io/json",
-            allowed_domains=("example.com",),
-            headless=True,
-            navigation_timeout_ms=30_000,
-            click_timeout_ms=15_000,
-            redirect_timeout_ms=30_000,
-            wait_after_redirect_seconds=0,
-            delay_between_targets_seconds=0,
+class ProxyFileTests(unittest.TestCase):
+    def proxy_line(self, suffix, port):
+        return f"sample-user-{suffix}:sample-pass-{suffix}@proxy-{suffix}.example:{port}"
+
+    def test_parses_rayobyte_lines_and_ignores_exact_duplicates(self):
+        first = self.proxy_line("one", 8000)
+        second = self.proxy_line("two", 8001)
+        proxies = main.parse_proxy_list_text(
+            f"# export\n{first}\n\n{first}\n{second}\n"
         )
 
+        self.assertEqual(len(proxies), 2)
+        self.assertEqual(proxies[0].name, "proxy-001")
+        self.assertEqual(proxies[0].server, "http://proxy-one.example:8000")
+        self.assertEqual(proxies[0].username, "sample-user-one")
+        self.assertEqual(proxies[0].password, "sample-pass-one")
+        self.assertEqual(proxies[1].name, "proxy-002")
+
+    def test_rejects_invalid_or_empty_proxy_files_without_echoing_the_line(self):
+        invalid = "SENSITIVE_INVALID_LINE"
+        with self.assertRaises(main.ConfigurationError) as raised:
+            main.parse_proxy_list_text(invalid)
+        self.assertNotIn(invalid, str(raised.exception))
+
+        with self.assertRaises(main.ConfigurationError):
+            main.parse_proxy_list_text("# commentaire uniquement\n")
+
+    def test_limits_file_to_one_hundred_unique_proxies(self):
+        content = "\n".join(
+            self.proxy_line(str(index), 8000 + index) for index in range(101)
+        )
+        with self.assertRaises(main.ConfigurationError):
+            main.parse_proxy_list_text(content)
+
+    def test_loads_utf8_bom_file(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "proxies.txt"
+            path.write_text(
+                "\ufeff" + self.proxy_line("one", 8000), encoding="utf-8"
+            )
+            proxies = main.load_proxy_file(path)
+        self.assertEqual(len(proxies), 1)
+
+    def test_missing_file_has_an_upload_instruction(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            missing = Path(temporary_directory) / "missing.txt"
+            with self.assertRaises(main.ConfigurationError) as raised:
+                main.load_proxy_file(missing)
+        self.assertIn("Téléversez", str(raised.exception))
+
+
+class SecurityTests(unittest.TestCase):
     def test_redacts_all_proxy_credentials(self):
+        settings = make_settings()
         message = main.redact_error(
-            "private-user:private-password second-user second-password at "
-            "http://private-user:private-password@proxy.test:8000",
-            self.make_settings(),
+            "SENSITIVE_USER_MARKER:SENSITIVE_PASSWORD_MARKER "
+            "SECOND_USER_MARKER SECOND_PASSWORD_MARKER at "
+            "http://SENSITIVE_USER_MARKER:SENSITIVE_PASSWORD_MARKER@proxy.test:8000",
+            settings,
         )
         for secret in (
-            "private-user",
-            "private-password",
-            "second-user",
-            "second-password",
+            "SENSITIVE_USER_MARKER",
+            "SENSITIVE_PASSWORD_MARKER",
+            "SECOND_USER_MARKER",
+            "SECOND_PASSWORD_MARKER",
         ):
             self.assertNotIn(secret, message)
         self.assertIn("***", message)
 
     def test_playwright_proxy_configuration(self):
         self.assertEqual(
-            self.make_settings().proxies[0].playwright_proxy(),
+            make_settings().proxies[0].playwright_proxy(),
             {
-                "server": "http://proxy.test:8000",
-                "username": "private-user",
-                "password": "private-password",
+                "server": "http://proxy-one.example:8000",
+                "username": "SENSITIVE_USER_MARKER",
+                "password": "SENSITIVE_PASSWORD_MARKER",
             },
         )
 
@@ -123,6 +155,36 @@ class SecurityTests(unittest.TestCase):
             main.extract_ip_information({"ip": "203.0.113.10", "country": "US"}),
             ("203.0.113.10", "US"),
         )
+
+    def test_request_guard_allows_public_hosts_and_blocks_private_hosts(self):
+        class FakeRoute:
+            def __init__(self):
+                self.action = ""
+
+            def continue_(self):
+                self.action = "continue"
+
+            def abort(self, reason):
+                self.action = reason
+
+        class FakePage:
+            def route(self, _pattern, callback):
+                self.callback = callback
+
+        class FakeRequest:
+            def __init__(self, url):
+                self.url = url
+
+        page = FakePage()
+        main.install_request_guard(page)
+
+        public_route = FakeRoute()
+        page.callback(public_route, FakeRequest("https://different.example.org/page"))
+        self.assertEqual(public_route.action, "continue")
+
+        private_route = FakeRoute()
+        page.callback(private_route, FakeRequest("http://127.0.0.1/private"))
+        self.assertEqual(private_route.action, "blockedbyclient")
 
 
 class ProxySelectionTests(unittest.TestCase):
@@ -177,7 +239,6 @@ class ProxySelectionTests(unittest.TestCase):
                 self.contexts.append(context)
                 return context
 
-        settings = SecurityTests().make_settings()
         result = main.VisitResult(
             started_at="now",
             initial_url="https://example.com/",
@@ -185,12 +246,185 @@ class ProxySelectionTests(unittest.TestCase):
         )
         browser = FakeBrowser()
         context, _page = main.open_verified_proxy_context(
-            browser, settings, result, random.Random(4)
+            browser, make_settings(), result, random.Random(4)
         )
         self.assertEqual(result.proxy_attempts, 2)
         self.assertEqual(result.exit_ip, "203.0.113.20")
         self.assertTrue(browser.contexts[0].closed)
         self.assertIs(context, browser.contexts[1])
+
+    def test_stops_after_two_failed_proxy_checks(self):
+        class FakeResponse:
+            status = 503
+
+        class FakePage:
+            def goto(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        class FakeContext:
+            def __init__(self):
+                self.closed = False
+
+            def set_default_navigation_timeout(self, _timeout):
+                return None
+
+            def new_page(self):
+                return FakePage()
+
+            def close(self):
+                self.closed = True
+
+        class FakeBrowser:
+            def __init__(self):
+                self.contexts = []
+
+            def new_context(self, **_kwargs):
+                context = FakeContext()
+                self.contexts.append(context)
+                return context
+
+        result = main.VisitResult("now", "https://example.com/", "Continuer")
+        browser = FakeBrowser()
+        with self.assertRaises(RuntimeError):
+            main.open_verified_proxy_context(
+                browser, make_settings(), result, random.Random(4)
+            )
+        self.assertEqual(result.proxy_attempts, 2)
+        self.assertTrue(all(context.closed for context in browser.contexts))
+
+
+class BrowserLifecycleTests(unittest.TestCase):
+    def test_launches_and_fully_closes_a_browser_for_each_target(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, ip_check=False):
+                self.ip_check = ip_check
+
+            def json(self):
+                return {"ip": "203.0.113.20", "country": "US"}
+
+            def text(self):
+                return "{}"
+
+        class FakeButton:
+            def __init__(self, page):
+                self.page = page
+                self.first = self
+
+            def wait_for(self, **_kwargs):
+                return None
+
+            def click(self, **_kwargs):
+                self.page.clicks += 1
+                self.page.url += "/redirected"
+
+        class FakePage:
+            def __init__(self):
+                self.url = "about:blank"
+                self.clicks = 0
+                self.main_frame = object()
+
+            def route(self, _pattern, callback):
+                self.route_callback = callback
+
+            def goto(self, url, **_kwargs):
+                if url == "https://ipinfo.io/json":
+                    return FakeResponse(ip_check=True)
+                self.url = url
+                return FakeResponse()
+
+            def on(self, *_args):
+                return None
+
+            def remove_listener(self, *_args):
+                return None
+
+            def get_by_role(self, role, name, exact):
+                self.role_request = (role, name, exact)
+                return FakeButton(self)
+
+            def wait_for_load_state(self, *_args, **_kwargs):
+                return None
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        class FakeContext:
+            def __init__(self):
+                self.page = FakePage()
+                self.closed = False
+
+            def set_default_navigation_timeout(self, _timeout):
+                return None
+
+            def new_page(self):
+                return self.page
+
+            def close(self):
+                self.closed = True
+
+        class FakeBrowser:
+            def __init__(self):
+                self.contexts = []
+                self.closed = False
+
+            def new_context(self, **_kwargs):
+                context = FakeContext()
+                self.contexts.append(context)
+                return context
+
+            def close(self):
+                self.closed = True
+
+        class FakeChromium:
+            def __init__(self):
+                self.browsers = []
+
+            def launch(self, **_kwargs):
+                browser = FakeBrowser()
+                self.browsers.append(browser)
+                return browser
+
+        class FakePlaywrightManager:
+            def __init__(self, chromium):
+                self.playwright = type("FakePlaywright", (), {"chromium": chromium})()
+
+            def __enter__(self):
+                return self.playwright
+
+            def __exit__(self, *_args):
+                return None
+
+        chromium = FakeChromium()
+        manager = FakePlaywrightManager(chromium)
+        settings = make_settings(
+            proxies=(
+                main.ProxyConfig(
+                    "proxy-001",
+                    "http://proxy-one.example:8000",
+                    "SENSITIVE_USER_MARKER",
+                    "SENSITIVE_PASSWORD_MARKER",
+                ),
+            )
+        )
+        targets = [
+            main.Target("https://one.example/page", "Continuer"),
+            main.Target("https://two.example/page", "Valider"),
+        ]
+
+        with mock.patch("playwright.sync_api.sync_playwright", return_value=manager):
+            report = main.run_targets(settings, targets, random.Random(2))
+
+        self.assertTrue(report.success)
+        self.assertEqual(len(chromium.browsers), 2)
+        self.assertTrue(all(browser.closed for browser in chromium.browsers))
+        for browser in chromium.browsers:
+            self.assertEqual(len(browser.contexts), 1)
+            self.assertTrue(browser.contexts[0].closed)
+            self.assertEqual(browser.contexts[0].page.clicks, 1)
+            self.assertEqual(browser.contexts[0].page.role_request[0], "button")
+            self.assertTrue(browser.contexts[0].page.role_request[2])
 
 
 class RedirectTests(unittest.TestCase):
