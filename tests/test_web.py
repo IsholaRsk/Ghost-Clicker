@@ -45,6 +45,13 @@ class WebUploadTests(unittest.TestCase):
         self.environment.stop()
         self.temporary_directory.cleanup()
 
+    def test_web_uses_the_shared_ephemeral_default_gateway_path(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                web.proxy_gateway_file_path(),
+                Path(web.DEFAULT_PROXY_GATEWAY_FILE),
+            )
+
     def post_file(self, route, field_name, content, filename):
         return self.client.post(
             route,

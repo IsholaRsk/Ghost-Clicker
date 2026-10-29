@@ -19,6 +19,7 @@ from typing import Any
 from flask import Flask, Response, redirect, request, url_for
 
 from main import (
+    DEFAULT_PROXY_GATEWAY_FILE,
     BrowserSettings,
     ConfigurationError,
     Target,
@@ -68,9 +69,7 @@ def reports_path() -> Path:
 
 
 def proxy_gateway_file_path() -> Path:
-    return storage_path(
-        "PROXY_GATEWAY_FILE", "/tmp/ghost-clicker-proxy-gateway.txt"
-    )
+    return storage_path("PROXY_GATEWAY_FILE", DEFAULT_PROXY_GATEWAY_FILE)
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
