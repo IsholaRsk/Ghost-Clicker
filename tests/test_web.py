@@ -109,7 +109,7 @@ class WebUploadTests(unittest.TestCase):
             {"targets": [], "schedule_enabled": True, "interval_minutes": 120}
         )
         content = (
-            "https://first.example/page | Continuer | Confirmer\n"
+            "https://first.example/page \u2060 | Continuer | Confirmer\n"
             "https://unrelated.example.org/other | Valider | Terminer\n"
         )
 
