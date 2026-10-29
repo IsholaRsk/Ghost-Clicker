@@ -350,6 +350,8 @@ def download_results() -> Response:
         [
             "source",
             "date",
+            "proxy",
+            "tentatives_proxy",
             "ip_sortie",
             "pays",
             "url_initiale",
@@ -368,8 +370,10 @@ def download_results() -> Response:
                 [
                     report.get("source", ""),
                     result.get("started_at", ""),
-                    report.get("exit_ip", ""),
-                    report.get("proxy_country", ""),
+                    result.get("proxy_name", ""),
+                    result.get("proxy_attempts", ""),
+                    result.get("exit_ip", ""),
+                    result.get("proxy_country", ""),
                     result.get("initial_url", ""),
                     result.get("button_text", ""),
                     result.get("final_url", ""),
@@ -399,6 +403,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                 <tr>
                   <td>{html.escape(str(result.get('started_at', '')))}</td>
                   <td>{html.escape(str(report.get('source', '')))}</td>
+                  <td>{html.escape(str(result.get('proxy_name', '')))}</td>
                   <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
                   <td>{html.escape(str(result.get('button_text', '')))}</td>
                   <td class="url">{html.escape(str(result.get('final_url', '')))}</td>
@@ -406,7 +411,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                   <td class="error">{html.escape(str(result.get('error', '')))}</td>
                 </tr>"""
             )
-    return "".join(rows) or '<tr><td colspan="7" class="empty">Aucun résultat.</td></tr>'
+    return "".join(rows) or '<tr><td colspan="8" class="empty">Aucun résultat.</td></tr>'
 
 
 @APP.get("/")
@@ -447,6 +452,7 @@ def home() -> str:
         if browser_settings is not None
         else "non configuré"
     )
+    proxy_count = len(browser_settings.proxies) if browser_settings is not None else 0
 
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -457,13 +463,13 @@ main{{max-width:1200px;margin:auto;padding:30px 20px}}h1{{font-size:32px;margin:
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.card{{background:linear-gradient(145deg,#132c47,var(--panel));border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}}
 label{{display:block;font-weight:700;margin:11px 0 5px}}textarea,input[type=number]{{width:100%;background:#081827;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px;font:inherit}}textarea{{min-height:190px;resize:vertical}}
 button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15px;margin:8px 8px 0 0;font-weight:750;text-decoration:none;cursor:pointer}}button{{background:var(--accent);color:#06141d}}button.secondary,a.button{{background:var(--blue);color:#07111f}}button.danger{{background:var(--red)}}button:disabled{{opacity:.4;cursor:not-allowed}}
-.notice{{padding:11px 14px;margin:10px 0;border-left:3px solid var(--blue);background:#10243a;color:#dce8f4}}code{{color:#b6f7e8}}.meta{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.meta div{{background:#0b1b2b;padding:12px;border-radius:10px}}.meta small{{display:block;color:var(--muted)}}
+.notice{{padding:11px 14px;margin:10px 0;border-left:3px solid var(--blue);background:#10243a;color:#dce8f4}}code{{color:#b6f7e8}}.meta{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.meta div{{background:#0b1b2b;padding:12px;border-radius:10px}}.meta small{{display:block;color:var(--muted)}}
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy, un clic explicite par URL, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy aléatoire vérifié par URL, un clic explicite, puis attente de redirection.</p>
 {message_html}
-<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Domaines autorisés</small><strong>{html.escape(allowed)}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
+<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Proxys disponibles</small><strong>{proxy_count}</strong></div><div><small>Domaines autorisés</small><strong>{html.escape(allowed)}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
 <form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
 <label for="targets">Une ligne par visite : URL | texte exact du bouton</label>
@@ -471,12 +477,12 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Chaque entrée reçoit au maximum un clic sur un bouton dont le texte correspond exactement.</p>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, un proxy est choisi aléatoirement et contrôlé. En cas d’échec du contrôle, un second proxy distinct est essayé une seule fois. Chaque URL reçoit au maximum un clic.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
 <p>Les paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
-<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>URL initiale</th><th>Bouton</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
+<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Proxy</th><th>URL initiale</th><th>Bouton</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
 </main></body></html>"""
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import random
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -19,10 +20,23 @@ class ConfigurationError(ValueError):
 
 
 @dataclass(frozen=True)
+class ProxyConfig:
+    name: str
+    server: str
+    username: str = ""
+    password: str = ""
+
+    def playwright_proxy(self) -> dict[str, str]:
+        proxy = {"server": self.server}
+        if self.username and self.password:
+            proxy["username"] = self.username
+            proxy["password"] = self.password
+        return proxy
+
+
+@dataclass(frozen=True)
 class BrowserSettings:
-    proxy_server: str
-    proxy_username: str
-    proxy_password: str
+    proxies: tuple[ProxyConfig, ...]
     ip_check_url: str
     allowed_domains: tuple[str, ...]
     headless: bool
@@ -31,13 +45,6 @@ class BrowserSettings:
     redirect_timeout_ms: int
     wait_after_redirect_seconds: float
     delay_between_targets_seconds: float
-
-    def playwright_proxy(self) -> dict[str, str]:
-        proxy = {"server": self.proxy_server}
-        if self.proxy_username and self.proxy_password:
-            proxy["username"] = self.proxy_username
-            proxy["password"] = self.proxy_password
-        return proxy
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,10 @@ class VisitResult:
     started_at: str
     initial_url: str
     button_text: str
+    proxy_name: str = ""
+    proxy_attempts: int = 0
+    exit_ip: str = ""
+    proxy_country: str = ""
     final_url: str = ""
     initial_status: int | None = None
     final_status: int | None = None
@@ -63,8 +74,6 @@ class VisitResult:
 class RunReport:
     started_at: str
     finished_at: str = ""
-    exit_ip: str = ""
-    proxy_country: str = ""
     success: bool = False
     error: str = ""
     results: list[VisitResult] = field(default_factory=list)
@@ -216,6 +225,43 @@ def validate_proxy_server(value: str) -> str:
     return server
 
 
+def parse_proxy_list_json(value: str) -> tuple[ProxyConfig, ...]:
+    raw = value.strip()
+    if not raw:
+        raise ConfigurationError("PROXY_LIST_JSON est absent ou vide.")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError("PROXY_LIST_JSON contient un JSON invalide.") from exc
+    if not isinstance(parsed, list) or not parsed:
+        raise ConfigurationError("PROXY_LIST_JSON doit être une liste non vide.")
+    if len(parsed) > 100:
+        raise ConfigurationError("PROXY_LIST_JSON accepte au maximum 100 proxys.")
+
+    proxies: list[ProxyConfig] = []
+    names: set[str] = set()
+    for index, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            raise ConfigurationError(f"Proxy {index} : objet JSON attendu.")
+        name = str(item.get("name") or f"proxy-{index:03d}").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_. -]{1,64}", name):
+            raise ConfigurationError(
+                f"Proxy {index} : nom invalide (lettres, chiffres, espace, _, . ou -)."
+            )
+        if name in names:
+            raise ConfigurationError(f"Nom de proxy dupliqué : {name}.")
+        server = validate_proxy_server(str(item.get("server", "")))
+        username = str(item.get("username", "")).strip()
+        password = str(item.get("password", "")).strip()
+        if bool(username) != bool(password):
+            raise ConfigurationError(
+                f"Proxy {name} : username et password doivent être remplis ensemble."
+            )
+        proxies.append(ProxyConfig(name, server, username, password))
+        names.add(name)
+    return tuple(proxies)
+
+
 def validate_button_text(value: str) -> str:
     text = value.strip()
     if not text:
@@ -234,18 +280,10 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
         ) from exc
     load_dotenv(base_dir / ".env", override=False)
 
-    username = os.getenv("PROXY_USERNAME", "").strip()
-    password = os.getenv("PROXY_PASSWORD", "").strip()
-    if bool(username) != bool(password):
-        raise ConfigurationError(
-            "PROXY_USERNAME et PROXY_PASSWORD doivent être tous les deux remplis."
-        )
-
+    proxies = parse_proxy_list_json(required_env("PROXY_LIST_JSON"))
     domains = parse_allowed_domains(os.getenv("ALLOWED_DOMAINS"))
     return BrowserSettings(
-        proxy_server=validate_proxy_server(required_env("PROXY_SERVER")),
-        proxy_username=username,
-        proxy_password=password,
+        proxies=proxies,
         ip_check_url=validate_public_url(
             os.getenv("IP_CHECK_URL", "https://ipinfo.io/json")
         ),
@@ -275,9 +313,14 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
 
 def redact_error(error: BaseException | str, settings: BrowserSettings) -> str:
     message = str(error).replace("\r", " ").replace("\n", " ").strip()
-    for secret in (settings.proxy_username, settings.proxy_password):
-        if secret:
-            message = message.replace(secret, "***")
+    secrets = [
+        secret
+        for proxy in settings.proxies
+        for secret in (proxy.username, proxy.password)
+        if secret
+    ]
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        message = message.replace(secret, "***")
     message = re.sub(
         r"(?i)(https?|socks5)://[^/@\s]+@",
         lambda match: f"{match.group(1)}://***@",
@@ -339,7 +382,71 @@ def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
         pass
 
 
-def run_targets(settings: BrowserSettings, targets: Sequence[Target]) -> RunReport:
+def choose_proxy_candidates(
+    proxies: Sequence[ProxyConfig], rng: Any | None = None
+) -> list[ProxyConfig]:
+    """Choisit un proxy au hasard et un second distinct pour l'unique reprise."""
+
+    if not proxies:
+        raise ConfigurationError("La liste de proxys est vide.")
+    random_source = rng or random.SystemRandom()
+    return random_source.sample(list(proxies), min(2, len(proxies)))
+
+
+def check_proxy(page: Any, settings: BrowserSettings) -> tuple[str, str]:
+    response = page.goto(
+        settings.ip_check_url,
+        wait_until="domcontentloaded",
+        timeout=settings.navigation_timeout_ms,
+    )
+    if response is None or not 200 <= response.status < 300:
+        status = response.status if response else "aucun"
+        raise RuntimeError(f"Contrôle proxy refusé : statut HTTP {status}.")
+    try:
+        payload = response.json()
+    except Exception:
+        payload = json.loads(response.text())
+    exit_ip, country = extract_ip_information(payload)
+    if not exit_ip:
+        raise RuntimeError("Le contrôle proxy n'a renvoyé aucune adresse IP.")
+    return exit_ip, country
+
+
+def open_verified_proxy_context(
+    browser: Any,
+    settings: BrowserSettings,
+    result: VisitResult,
+    rng: Any | None = None,
+) -> tuple[Any, Any]:
+    """Vérifie le proxy aléatoire, puis essaie une seule fois un proxy distinct."""
+
+    errors: list[str] = []
+    for proxy in choose_proxy_candidates(settings.proxies, rng):
+        context = None
+        result.proxy_attempts += 1
+        result.proxy_name = proxy.name
+        try:
+            context = browser.new_context(proxy=proxy.playwright_proxy())
+            context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+            page = context.new_page()
+            result.exit_ip, result.proxy_country = check_proxy(page, settings)
+            return context, page
+        except Exception as exc:
+            errors.append(f"{proxy.name}: {redact_error(exc, settings)}")
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+
+    raise RuntimeError("; ".join(errors) or "Aucun proxy disponible.")
+
+
+def run_targets(
+    settings: BrowserSettings,
+    targets: Sequence[Target],
+    rng: Any | None = None,
+) -> RunReport:
     if not targets:
         raise ConfigurationError("Aucune URL n'est configurée.")
 
@@ -350,33 +457,12 @@ def run_targets(settings: BrowserSettings, targets: Sequence[Target]) -> RunRepo
             "Playwright n'est pas installé. Exécutez pip install -r requirements.txt."
         ) from exc
 
+    random_source = rng or random.SystemRandom()
     report = RunReport(started_at=now_iso())
     with sync_playwright() as playwright:
         browser = None
-        context = None
         try:
             browser = playwright.chromium.launch(headless=settings.headless)
-            context = browser.new_context(proxy=settings.playwright_proxy())
-            context.set_default_navigation_timeout(settings.navigation_timeout_ms)
-            page = context.new_page()
-
-            check_response = page.goto(
-                settings.ip_check_url,
-                wait_until="domcontentloaded",
-                timeout=settings.navigation_timeout_ms,
-            )
-            if check_response is None or not 200 <= check_response.status < 300:
-                status = check_response.status if check_response else "aucun"
-                raise RuntimeError(f"Contrôle proxy refusé : statut HTTP {status}.")
-            try:
-                payload = check_response.json()
-            except Exception:
-                payload = json.loads(check_response.text())
-            report.exit_ip, report.proxy_country = extract_ip_information(payload)
-            if not report.exit_ip:
-                raise RuntimeError("Le contrôle proxy n'a renvoyé aucune adresse IP.")
-
-            install_request_guard(page, settings.allowed_domains)
 
             for index, target in enumerate(targets):
                 started = time.monotonic()
@@ -385,20 +471,29 @@ def run_targets(settings: BrowserSettings, targets: Sequence[Target]) -> RunRepo
                     initial_url=target.url,
                     button_text=target.button_text,
                 )
+                context = None
+                page = None
                 navigation_status: dict[str, int | None] = {"value": None}
+                record_navigation_handler: Any | None = None
 
-                def record_navigation(response: Any) -> None:
-                    try:
-                        if (
-                            response.request.is_navigation_request()
-                            and response.frame == page.main_frame
-                        ):
-                            navigation_status["value"] = response.status
-                    except Exception:
-                        return
-
-                page.on("response", record_navigation)
                 try:
+                    context, page = open_verified_proxy_context(
+                        browser, settings, result, random_source
+                    )
+                    install_request_guard(page, settings.allowed_domains)
+
+                    def record_navigation(response: Any) -> None:
+                        try:
+                            if (
+                                response.request.is_navigation_request()
+                                and response.frame == page.main_frame
+                            ):
+                                navigation_status["value"] = response.status
+                        except Exception:
+                            return
+
+                    record_navigation_handler = record_navigation
+                    page.on("response", record_navigation_handler)
                     response = page.goto(
                         target.url,
                         wait_until="domcontentloaded",
@@ -425,10 +520,19 @@ def run_targets(settings: BrowserSettings, targets: Sequence[Target]) -> RunRepo
                     result.final_status = navigation_status["value"]
                     result.success = True
                 except Exception as exc:
-                    result.final_url = page.url
+                    result.final_url = page.url if page is not None else ""
                     result.error = redact_error(exc, settings)
                 finally:
-                    page.remove_listener("response", record_navigation)
+                    if page is not None and record_navigation_handler is not None:
+                        try:
+                            page.remove_listener("response", record_navigation_handler)
+                        except Exception:
+                            pass
+                    if context is not None:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
                     result.duration_ms = round((time.monotonic() - started) * 1_000)
                     report.results.append(result)
 
@@ -446,11 +550,6 @@ def run_targets(settings: BrowserSettings, targets: Sequence[Target]) -> RunRepo
             report.success = False
         finally:
             report.finished_at = now_iso()
-            if context is not None:
-                try:
-                    context.close()
-                except Exception:
-                    pass
             if browser is not None:
                 try:
                     browser.close()
