@@ -1,13 +1,16 @@
 # Ghost-Clicker — Web Service Docker
 
-Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise un seul proxy et, pour chaque URL enregistrée :
+Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une liste secrète de proxys et, pour chaque URL enregistrée :
 
-1. ouvre la page dans Chromium headless ;
-2. recherche un bouton par son texte visible exact ;
-3. effectue un seul clic ;
-4. attend que l’URL change ;
-5. enregistre l’URL finale, le statut et l’erreur éventuelle ;
-6. ferme Chromium à la fin de l’exécution.
+1. choisit un proxy aléatoirement ;
+2. contrôle son IP de sortie ;
+3. essaie une seule fois un second proxy distinct si ce contrôle échoue ;
+4. ouvre la page dans Chromium headless ;
+5. recherche un bouton par son texte visible exact ;
+6. effectue un seul clic ;
+7. attend que l’URL change ;
+8. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
+9. ferme le contexte de navigation avant de passer à l’URL suivante.
 
 Il n’effectue aucun clic supplémentaire, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
@@ -49,9 +52,19 @@ Render demande :
 
 | Variable | Valeur |
 |---|---|
-| `PROXY_USERNAME` | nouvel utilisateur Rayobyte |
-| `PROXY_PASSWORD` | mot de passe Rayobyte complet, avec ses éventuels paramètres |
+| `PROXY_LIST_JSON` | liste JSON secrète des proxys autorisés |
 | `ALLOWED_DOMAINS` | domaines que vous êtes autorisé à tester, séparés par des virgules |
+
+Exemple de structure pour `PROXY_LIST_JSON` (remplacez les champs vides directement dans Render, jamais dans Git) :
+
+```json
+[
+  {"name":"us-1","server":"http://us-east.gw.rayobyte.com:8000","username":"","password":""},
+  {"name":"us-2","server":"http://us-east.gw.rayobyte.com:8000","username":"","password":""}
+]
+```
+
+Les noms doivent être uniques. Conservez dans chaque mot de passe les paramètres officiels Rayobyte nécessaires à la connexion.
 
 Exemple de domaines :
 
@@ -61,7 +74,7 @@ site1.example,site2.example
 
 N’ajoutez ni `https://`, ni chemin dans `ALLOWED_DOMAINS`.
 
-`PROXY_SERVER` est déjà configuré avec l’endpoint Rayobyte fourni. `ADMIN_TOKEN` est généré automatiquement.
+`ADMIN_TOKEN` est généré automatiquement. La liste de proxys reste uniquement dans les variables secrètes Render.
 
 Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -109,6 +122,8 @@ Une seule exécution peut fonctionner à la fois. La planification et les résul
 L’interface affiche :
 
 - date et source de l’exécution ;
+- nom du proxy choisi et nombre de tentatives ;
+- IP et pays de sortie ;
 - URL initiale ;
 - texte du bouton ;
 - URL après redirection ;
@@ -166,7 +181,9 @@ python .\main.py
 - maximum de 50 URL ;
 - un clic explicite maximum par URL ;
 - fréquence planifiée minimale de 60 minutes ;
-- aucune rotation de proxy ou technique de dissimulation.
+- choix aléatoire limité au pool explicitement autorisé ;
+- une seule reprise avec un proxy distinct lorsque le contrôle IP échoue ;
+- aucune technique de dissimulation ou simulation de comportement humain.
 
 ## Tests
 

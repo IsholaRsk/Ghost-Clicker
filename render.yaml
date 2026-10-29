@@ -10,11 +10,7 @@ services:
     envVars:
       - key: ADMIN_TOKEN
         generateValue: true
-      - key: PROXY_SERVER
-        value: http://us-east.gw.rayobyte.com:8000
-      - key: PROXY_USERNAME
-        sync: false
-      - key: PROXY_PASSWORD
+      - key: PROXY_LIST_JSON
         sync: false
       - key: ALLOWED_DOMAINS
         sync: false
