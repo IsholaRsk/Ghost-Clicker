@@ -35,6 +35,21 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(main.validate_public_url(value), value)
 
+    def test_removes_invisible_unicode_noise_at_url_boundaries(self):
+        dirty = " \u2060https://www.example.com/page \u2060 "
+        self.assertEqual(
+            main.validate_public_url(dirty),
+            "https://www.example.com/page",
+        )
+
+    def test_rejects_spaces_or_invisible_characters_inside_urls(self):
+        for value in (
+            "https://www.example.com/bad path",
+            "https://www.example.com/bad\u2060path",
+        ):
+            with self.subTest(value=value), self.assertRaises(main.ConfigurationError):
+                main.validate_public_url(value)
+
     def test_rejects_private_local_or_unsafe_urls(self):
         values = [
             "http://127.0.0.1/",
@@ -431,6 +446,22 @@ class BrowserLifecycleTests(unittest.TestCase):
                     ("button", target.second_button_text, True),
                 ],
             )
+
+
+class TargetResponseTests(unittest.TestCase):
+    def test_accepts_success_and_redirect_statuses(self):
+        for status in (200, 302):
+            with self.subTest(status=status):
+                response = type("FakeResponse", (), {"status": status})()
+                main.require_successful_target_response(response)
+
+    def test_reports_missing_or_failed_target_responses(self):
+        with self.assertRaises(RuntimeError):
+            main.require_successful_target_response(None)
+
+        response = type("FakeResponse", (), {"status": 404})()
+        with self.assertRaisesRegex(RuntimeError, "404"):
+            main.require_successful_target_response(response)
 
 
 class RedirectTests(unittest.TestCase):

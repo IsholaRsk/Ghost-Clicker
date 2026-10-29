@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -135,10 +136,33 @@ def parse_nonnegative_float(value: str | None, default: float, name: str) -> flo
     return parsed
 
 
+def clean_url_boundaries(value: str) -> str:
+    """Retire les espaces et caractères Unicode invisibles copiés aux extrémités."""
+
+    def is_boundary_noise(character: str) -> bool:
+        return character.isspace() or unicodedata.category(character) in {"Cc", "Cf"}
+
+    start = 0
+    end = len(value)
+    while start < end and is_boundary_noise(value[start]):
+        start += 1
+    while end > start and is_boundary_noise(value[end - 1]):
+        end -= 1
+    return value[start:end]
+
+
 def validate_public_url(value: str) -> str:
-    url = value.strip()
+    url = clean_url_boundaries(value)
     if not url:
         raise ConfigurationError("URL vide.")
+    if any(
+        character.isspace()
+        or unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        for character in url
+    ):
+        raise ConfigurationError(
+            "L'URL contient un espace ou un caractère invisible non autorisé."
+        )
     if len(url) > 2_048:
         raise ConfigurationError("URL trop longue.")
     try:
@@ -360,6 +384,15 @@ def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
         pass
 
 
+def require_successful_target_response(response: Any) -> None:
+    if response is None:
+        raise RuntimeError("La page cible n'a renvoyé aucune réponse HTTP.")
+    if not 200 <= response.status < 400:
+        raise RuntimeError(
+            f"Page cible inaccessible : statut HTTP {response.status}."
+        )
+
+
 def check_proxy(page: Any, settings: BrowserSettings) -> tuple[str, str]:
     response = page.goto(
         settings.ip_check_url,
@@ -471,6 +504,7 @@ def run_targets(
                         timeout=settings.navigation_timeout_ms,
                     )
                     result.initial_status = response.status if response else None
+                    require_successful_target_response(response)
                     first_button = page.get_by_role(
                         "button", name=target.button_text, exact=True
                     ).first
