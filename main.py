@@ -5,7 +5,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
-import random
 import re
 import time
 from collections.abc import Sequence
@@ -37,7 +36,7 @@ class ProxyConfig:
 
 @dataclass(frozen=True)
 class BrowserSettings:
-    proxies: tuple[ProxyConfig, ...]
+    gateway: ProxyConfig
     ip_check_url: str
     headless: bool
     navigation_timeout_ms: int
@@ -195,54 +194,55 @@ def validate_proxy_server(value: str) -> str:
     return server
 
 
-def parse_proxy_list_text(value: str) -> tuple[ProxyConfig, ...]:
-    """Lit le format Rayobyte : username:password@host:port, une ligne par proxy."""
+def parse_proxy_gateway_text(value: str) -> ProxyConfig:
+    """Lit une passerelle rotative : username:password@host:port."""
 
-    proxies: list[ProxyConfig] = []
-    seen: set[str] = set()
-    for line_number, raw_line in enumerate(value.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line in seen:
-            continue
-        try:
-            authentication, address = line.rsplit("@", maxsplit=1)
-            username, password = authentication.split(":", maxsplit=1)
-            host, port = address.rsplit(":", maxsplit=1)
-        except ValueError as exc:
-            raise ConfigurationError(
-                f"Proxy ligne {line_number} : format username:password@host:port attendu."
-            ) from exc
-        username = username.strip()
-        password = password.strip()
-        host = host.strip()
-        port = port.strip()
-        if not username or not password or not host or not port.isdigit():
-            raise ConfigurationError(f"Proxy ligne {line_number} : valeur incomplète.")
-        server = validate_proxy_server(f"http://{host}:{port}")
-        proxies.append(
-            ProxyConfig(f"proxy-{len(proxies) + 1:03d}", server, username, password)
+    lines = [
+        (line_number, raw_line.strip())
+        for line_number, raw_line in enumerate(value.splitlines(), start=1)
+        if raw_line.strip() and not raw_line.strip().startswith("#")
+    ]
+    if not lines:
+        raise ConfigurationError("Le fichier ne contient aucune passerelle proxy.")
+    if len(lines) != 1:
+        raise ConfigurationError(
+            "Le fichier doit contenir une seule passerelle proxy rotative."
         )
-        seen.add(line)
-        if len(proxies) > 100:
-            raise ConfigurationError("Le fichier accepte au maximum 100 proxys uniques.")
 
-    if not proxies:
-        raise ConfigurationError("Le fichier de proxys ne contient aucune ligne valide.")
-    return tuple(proxies)
+    line_number, line = lines[0]
+    try:
+        authentication, address = line.rsplit("@", maxsplit=1)
+        username, password = authentication.split(":", maxsplit=1)
+        host, port = address.rsplit(":", maxsplit=1)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : format "
+            "username:password@host:port attendu."
+        ) from exc
+    username = username.strip()
+    password = password.strip()
+    host = host.strip()
+    port = port.strip()
+    if not username or not password or not host or not port.isdigit():
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : valeur incomplète."
+        )
+    server = validate_proxy_server(f"http://{host}:{port}")
+    return ProxyConfig("passerelle-rotative", server, username, password)
 
 
-def load_proxy_file(path: Path) -> tuple[ProxyConfig, ...]:
+def load_proxy_gateway(path: Path) -> ProxyConfig:
     if not path.exists():
         raise ConfigurationError(
-            "Aucun fichier de proxys. Téléversez la liste Rayobyte dans l'interface."
+            "Aucune passerelle proxy. Enregistrez-la dans l'interface."
         )
     try:
         content = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError) as exc:
-        raise ConfigurationError("Impossible de lire le fichier de proxys.") from exc
-    return parse_proxy_list_text(content)
+        raise ConfigurationError(
+            "Impossible de lire le fichier de passerelle proxy."
+        ) from exc
+    return parse_proxy_gateway_text(content)
 
 
 def validate_button_text(value: str) -> str:
@@ -263,11 +263,11 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
         ) from exc
     load_dotenv(base_dir / ".env", override=False)
 
-    proxy_path = Path(os.getenv("PROXY_LIST_FILE", "proxies.txt"))
-    if not proxy_path.is_absolute():
-        proxy_path = base_dir / proxy_path
+    gateway_path = Path(os.getenv("PROXY_GATEWAY_FILE", "proxy-gateway.txt"))
+    if not gateway_path.is_absolute():
+        gateway_path = base_dir / gateway_path
     return BrowserSettings(
-        proxies=load_proxy_file(proxy_path),
+        gateway=load_proxy_gateway(gateway_path),
         ip_check_url=validate_public_url(
             os.getenv("IP_CHECK_URL", "https://ipinfo.io/json")
         ),
@@ -298,8 +298,7 @@ def redact_error(error: BaseException | str, settings: BrowserSettings) -> str:
     message = str(error).replace("\r", " ").replace("\n", " ").strip()
     secrets = [
         secret
-        for proxy in settings.proxies
-        for secret in (proxy.username, proxy.password)
+        for secret in (settings.gateway.username, settings.gateway.password)
         if secret
     ]
     for secret in sorted(set(secrets), key=len, reverse=True):
@@ -357,17 +356,6 @@ def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
         pass
 
 
-def choose_proxy_candidates(
-    proxies: Sequence[ProxyConfig], rng: Any | None = None
-) -> list[ProxyConfig]:
-    """Choisit un proxy au hasard et un second distinct pour l'unique reprise."""
-
-    if not proxies:
-        raise ConfigurationError("La liste de proxys est vide.")
-    random_source = rng or random.SystemRandom()
-    return random_source.sample(list(proxies), min(2, len(proxies)))
-
-
 def check_proxy(page: Any, settings: BrowserSettings) -> tuple[str, str]:
     response = page.goto(
         settings.ip_check_url,
@@ -391,36 +379,37 @@ def open_verified_proxy_context(
     browser: Any,
     settings: BrowserSettings,
     result: VisitResult,
-    rng: Any | None = None,
 ) -> tuple[Any, Any]:
-    """Vérifie le proxy aléatoire, puis essaie une seule fois un proxy distinct."""
+    """Vérifie la passerelle et recrée une connexion une seule fois en cas d'échec."""
 
     errors: list[str] = []
-    for proxy in choose_proxy_candidates(settings.proxies, rng):
+    gateway = settings.gateway
+    result.proxy_name = gateway.name
+    for attempt in range(1, 3):
         context = None
         result.proxy_attempts += 1
-        result.proxy_name = proxy.name
         try:
-            context = browser.new_context(proxy=proxy.playwright_proxy())
+            context = browser.new_context(proxy=gateway.playwright_proxy())
             context.set_default_navigation_timeout(settings.navigation_timeout_ms)
             page = context.new_page()
             result.exit_ip, result.proxy_country = check_proxy(page, settings)
             return context, page
         except Exception as exc:
-            errors.append(f"{proxy.name}: {redact_error(exc, settings)}")
+            errors.append(
+                f"tentative {attempt}: {redact_error(exc, settings)}"
+            )
             if context is not None:
                 try:
                     context.close()
                 except Exception:
                     pass
 
-    raise RuntimeError("; ".join(errors) or "Aucun proxy disponible.")
+    raise RuntimeError("; ".join(errors))
 
 
 def run_targets(
     settings: BrowserSettings,
     targets: Sequence[Target],
-    rng: Any | None = None,
 ) -> RunReport:
     if not targets:
         raise ConfigurationError("Aucune URL n'est configurée.")
@@ -432,7 +421,6 @@ def run_targets(
             "Playwright n'est pas installé. Exécutez pip install -r requirements.txt."
         ) from exc
 
-    random_source = rng or random.SystemRandom()
     report = RunReport(started_at=now_iso())
     with sync_playwright() as playwright:
         try:
@@ -453,7 +441,7 @@ def run_targets(
                 try:
                     browser = playwright.chromium.launch(headless=settings.headless)
                     context, page = open_verified_proxy_context(
-                        browser, settings, result, random_source
+                        browser, settings, result
                     )
                     install_request_guard(page)
 

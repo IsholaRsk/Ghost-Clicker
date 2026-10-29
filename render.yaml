@@ -10,8 +10,8 @@ services:
     envVars:
       - key: ADMIN_TOKEN
         generateValue: true
-      - key: PROXY_LIST_FILE
-        value: /tmp/ghost-clicker-proxies.txt
+      - key: PROXY_GATEWAY_FILE
+        value: /tmp/ghost-clicker-proxy-gateway.txt
       - key: HEADLESS
         value: "true"
       - key: IP_CHECK_URL

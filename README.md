@@ -1,10 +1,10 @@
 # Ghost-Clicker — Web Service Docker
 
-Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une liste secrète de proxys et, pour chaque URL enregistrée :
+Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une passerelle proxy rotative secrète et, pour chaque URL enregistrée :
 
-1. choisit un proxy aléatoirement ;
+1. crée une nouvelle connexion à la passerelle rotative ;
 2. contrôle son IP de sortie ;
-3. essaie une seule fois un second proxy distinct si ce contrôle échoue ;
+3. recrée une seule fois une connexion neuve à la même passerelle si ce contrôle échoue ;
 4. ouvre la page dans Chromium headless ;
 5. recherche le bouton par son premier libellé visible exact et clique une fois ;
 6. attend que ce bouton affiche le second libellé exact ;
@@ -48,15 +48,15 @@ Docker
 
 Le Blueprint utilise le plan Render **Starter** afin que la planification interne reste active. Un Web Service gratuit peut se mettre en veille et ne convient donc qu’aux lancements manuels.
 
-### 2. Préparer les deux fichiers
+### 2. Préparer la passerelle et le fichier des cibles
 
-Le fichier Rayobyte utilise exactement :
+La passerelle Rayobyte utilise exactement cette valeur, sans lien `mailto:` ni mise en forme Markdown :
 
 ```text
 username:password@host:port
 ```
 
-Une ligne par proxy. Le fichier reste secret et n’est jamais ajouté à Git. Les doublons exacts sont ignorés.
+La passerelle doit attribuer une nouvelle IP à chaque connexion. La valeur est saisie dans l’interface authentifiée, stockée uniquement dans `/tmp` et jamais ajoutée à Git. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
 Le fichier des cibles utilise :
 
@@ -79,16 +79,16 @@ Après le build :
    - utilisateur : `admin` ;
    - mot de passe : valeur de `ADMIN_TOKEN`.
 
-## Importer les listes en ligne
+## Importer la configuration en ligne
 
 Après connexion :
 
-1. importez le fichier Rayobyte avec **Importer les proxys** ;
+1. saisissez la valeur dans le champ protégé puis cliquez sur **Enregistrer la passerelle** ;
 2. importez le fichier des cibles avec **Importer les URL** ;
-3. vérifiez le nombre de proxys uniques affiché ;
+3. vérifiez que la passerelle est indiquée comme configurée ;
 4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Les deux libellés après les séparateurs `|` doivent correspondre exactement aux noms accessibles successifs de l’élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer les listes.
+Les deux libellés après les séparateurs `|` doivent correspondre exactement aux noms accessibles successifs de l’élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
 
 ## Lancer le bot
 
@@ -97,14 +97,14 @@ Deux modes sont disponibles :
 - **Lancer maintenant** : exécution manuelle ;
 - **Planification** : intervalle configurable entre 60 et 10080 minutes.
 
-Une seule exécution peut fonctionner à la fois. Les listes importées, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
+Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
 
 ## Résultats
 
 L’interface affiche :
 
 - date et source de l’exécution ;
-- nom du proxy choisi et nombre de tentatives ;
+- nom de la passerelle et nombre de tentatives de connexion ;
 - IP et pays de sortie ;
 - URL initiale ;
 - premier et second libellés du bouton ;
@@ -138,17 +138,17 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Pour utiliser `main.py` avec une seule URL, créez `proxies.txt` au format Rayobyte indiqué plus haut, puis remplissez aussi :
+Pour utiliser `main.py` avec une seule URL, créez `proxy-gateway.txt` avec l’unique passerelle Rayobyte indiquée plus haut, puis remplissez aussi :
 
 ```dotenv
-PROXY_LIST_FILE="proxies.txt"
+PROXY_GATEWAY_FILE="proxy-gateway.txt"
 TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
 SECOND_BUTTON_TEXT="Confirmer"
 HEADLESS=false
 ```
 
-`proxies.txt` est ignoré par Git et doit rester local. Puis :
+`proxy-gateway.txt` est ignoré par Git et doit rester local. Puis :
 
 ```powershell
 python .\main.py
@@ -159,13 +159,13 @@ python .\main.py
 - authentification HTTP Basic avec `ADMIN_TOKEN` ;
 - protection CSRF des formulaires ;
 - jeton administrateur uniquement dans les variables Render ou `.env` ;
-- fichier proxy secret conservé en mode `0600` dans `/tmp` sur Render ;
+- passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
 - au maximum deux clics explicites par URL, un pour chaque libellé configuré ;
 - fréquence planifiée minimale de 60 minutes ;
-- choix aléatoire limité au pool explicitement autorisé ;
-- une seule reprise avec un proxy distinct lorsque le contrôle IP échoue ;
+- nouvelle connexion à la passerelle rotative pour chaque URL ;
+- une seule reprise avec une connexion neuve lorsque le contrôle IP échoue ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 
 ## Tests
