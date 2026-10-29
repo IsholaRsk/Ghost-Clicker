@@ -1,4 +1,4 @@
-"""Moteur Playwright : un proxy, une liste autorisée, un clic par URL."""
+"""Moteur Playwright : un proxy vérifié et deux clics par URL publique."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ import os
 import random
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 
@@ -38,7 +39,6 @@ class ProxyConfig:
 class BrowserSettings:
     proxies: tuple[ProxyConfig, ...]
     ip_check_url: str
-    allowed_domains: tuple[str, ...]
     headless: bool
     navigation_timeout_ms: int
     click_timeout_ms: int
@@ -51,6 +51,7 @@ class BrowserSettings:
 class Target:
     url: str
     button_text: str
+    second_button_text: str
 
 
 @dataclass
@@ -58,6 +59,7 @@ class VisitResult:
     started_at: str
     initial_url: str
     button_text: str
+    second_button_text: str
     proxy_name: str = ""
     proxy_attempts: int = 0
     exit_ip: str = ""
@@ -132,32 +134,7 @@ def parse_nonnegative_float(value: str | None, default: float, name: str) -> flo
     return parsed
 
 
-def parse_allowed_domains(value: str | None) -> tuple[str, ...]:
-    if value is None or not value.strip():
-        raise ConfigurationError(
-            "ALLOWED_DOMAINS est obligatoire pour limiter l'automatisation aux sites autorisés."
-        )
-    domains: list[str] = []
-    for raw in value.split(","):
-        domain = raw.strip().lower().rstrip(".")
-        if not domain:
-            continue
-        if "://" in domain or "/" in domain or ":" in domain:
-            raise ConfigurationError(
-                "ALLOWED_DOMAINS attend des domaines sans protocole, chemin ou port."
-            )
-        try:
-            domain = domain.encode("idna").decode("ascii")
-        except UnicodeError as exc:
-            raise ConfigurationError(f"Domaine invalide : {domain!r}.") from exc
-        if domain not in domains:
-            domains.append(domain)
-    if not domains:
-        raise ConfigurationError("ALLOWED_DOMAINS ne contient aucun domaine.")
-    return tuple(domains)
-
-
-def validate_public_url(value: str, allowed_domains: Sequence[str] = ()) -> str:
+def validate_public_url(value: str) -> str:
     url = value.strip()
     if not url:
         raise ConfigurationError("URL vide.")
@@ -188,13 +165,6 @@ def validate_public_url(value: str, allowed_domains: Sequence[str] = ()) -> str:
     if address is not None and not address.is_global:
         raise ConfigurationError("Les adresses privées ou réservées sont interdites.")
 
-    if allowed_domains and not any(
-        hostname == domain or hostname.endswith(f".{domain}")
-        for domain in allowed_domains
-    ):
-        raise ConfigurationError(
-            f"Le domaine {hostname} n'est pas présent dans ALLOWED_DOMAINS."
-        )
     return url
 
 
@@ -225,41 +195,54 @@ def validate_proxy_server(value: str) -> str:
     return server
 
 
-def parse_proxy_list_json(value: str) -> tuple[ProxyConfig, ...]:
-    raw = value.strip()
-    if not raw:
-        raise ConfigurationError("PROXY_LIST_JSON est absent ou vide.")
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ConfigurationError("PROXY_LIST_JSON contient un JSON invalide.") from exc
-    if not isinstance(parsed, list) or not parsed:
-        raise ConfigurationError("PROXY_LIST_JSON doit être une liste non vide.")
-    if len(parsed) > 100:
-        raise ConfigurationError("PROXY_LIST_JSON accepte au maximum 100 proxys.")
+def parse_proxy_list_text(value: str) -> tuple[ProxyConfig, ...]:
+    """Lit le format Rayobyte : username:password@host:port, une ligne par proxy."""
 
     proxies: list[ProxyConfig] = []
-    names: set[str] = set()
-    for index, item in enumerate(parsed, start=1):
-        if not isinstance(item, dict):
-            raise ConfigurationError(f"Proxy {index} : objet JSON attendu.")
-        name = str(item.get("name") or f"proxy-{index:03d}").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_. -]{1,64}", name):
+    seen: set[str] = set()
+    for line_number, raw_line in enumerate(value.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in seen:
+            continue
+        try:
+            authentication, address = line.rsplit("@", maxsplit=1)
+            username, password = authentication.split(":", maxsplit=1)
+            host, port = address.rsplit(":", maxsplit=1)
+        except ValueError as exc:
             raise ConfigurationError(
-                f"Proxy {index} : nom invalide (lettres, chiffres, espace, _, . ou -)."
-            )
-        if name in names:
-            raise ConfigurationError(f"Nom de proxy dupliqué : {name}.")
-        server = validate_proxy_server(str(item.get("server", "")))
-        username = str(item.get("username", "")).strip()
-        password = str(item.get("password", "")).strip()
-        if bool(username) != bool(password):
-            raise ConfigurationError(
-                f"Proxy {name} : username et password doivent être remplis ensemble."
-            )
-        proxies.append(ProxyConfig(name, server, username, password))
-        names.add(name)
+                f"Proxy ligne {line_number} : format username:password@host:port attendu."
+            ) from exc
+        username = username.strip()
+        password = password.strip()
+        host = host.strip()
+        port = port.strip()
+        if not username or not password or not host or not port.isdigit():
+            raise ConfigurationError(f"Proxy ligne {line_number} : valeur incomplète.")
+        server = validate_proxy_server(f"http://{host}:{port}")
+        proxies.append(
+            ProxyConfig(f"proxy-{len(proxies) + 1:03d}", server, username, password)
+        )
+        seen.add(line)
+        if len(proxies) > 100:
+            raise ConfigurationError("Le fichier accepte au maximum 100 proxys uniques.")
+
+    if not proxies:
+        raise ConfigurationError("Le fichier de proxys ne contient aucune ligne valide.")
     return tuple(proxies)
+
+
+def load_proxy_file(path: Path) -> tuple[ProxyConfig, ...]:
+    if not path.exists():
+        raise ConfigurationError(
+            "Aucun fichier de proxys. Téléversez la liste Rayobyte dans l'interface."
+        )
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigurationError("Impossible de lire le fichier de proxys.") from exc
+    return parse_proxy_list_text(content)
 
 
 def validate_button_text(value: str) -> str:
@@ -280,14 +263,14 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
         ) from exc
     load_dotenv(base_dir / ".env", override=False)
 
-    proxies = parse_proxy_list_json(required_env("PROXY_LIST_JSON"))
-    domains = parse_allowed_domains(os.getenv("ALLOWED_DOMAINS"))
+    proxy_path = Path(os.getenv("PROXY_LIST_FILE", "proxies.txt"))
+    if not proxy_path.is_absolute():
+        proxy_path = base_dir / proxy_path
     return BrowserSettings(
-        proxies=proxies,
+        proxies=load_proxy_file(proxy_path),
         ip_check_url=validate_public_url(
             os.getenv("IP_CHECK_URL", "https://ipinfo.io/json")
         ),
-        allowed_domains=domains,
         headless=parse_bool(os.getenv("HEADLESS"), True, "HEADLESS"),
         navigation_timeout_ms=parse_positive_int(
             os.getenv("NAVIGATION_TIMEOUT_MS"), 30_000, "NAVIGATION_TIMEOUT_MS", 1_000
@@ -342,8 +325,8 @@ def extract_ip_information(payload: Any) -> tuple[str, str]:
     return ip, country
 
 
-def install_request_guard(page: Any, allowed_domains: Sequence[str]) -> None:
-    """Bloque les navigations privées et les redirections hors liste blanche."""
+def install_request_guard(page: Any) -> None:
+    """Bloque uniquement les requêtes locales, privées ou réservées."""
 
     def handle(route: Any, request: Any) -> None:
         parsed = urlsplit(request.url)
@@ -351,15 +334,7 @@ def install_request_guard(page: Any, allowed_domains: Sequence[str]) -> None:
             route.continue_()
             return
         try:
-            is_main_document = (
-                request.is_navigation_request() and request.frame == page.main_frame
-            )
-        except Exception:
-            is_main_document = False
-        try:
-            validate_public_url(
-                request.url, allowed_domains if is_main_document else ()
-            )
+            validate_public_url(request.url)
         except ConfigurationError:
             route.abort("blockedbyclient")
             return
@@ -460,35 +435,39 @@ def run_targets(
     random_source = rng or random.SystemRandom()
     report = RunReport(started_at=now_iso())
     with sync_playwright() as playwright:
-        browser = None
         try:
-            browser = playwright.chromium.launch(headless=settings.headless)
-
             for index, target in enumerate(targets):
                 started = time.monotonic()
                 result = VisitResult(
                     started_at=now_iso(),
                     initial_url=target.url,
                     button_text=target.button_text,
+                    second_button_text=target.second_button_text,
                 )
+                browser = None
                 context = None
                 page = None
                 navigation_status: dict[str, int | None] = {"value": None}
                 record_navigation_handler: Any | None = None
 
                 try:
+                    browser = playwright.chromium.launch(headless=settings.headless)
                     context, page = open_verified_proxy_context(
                         browser, settings, result, random_source
                     )
-                    install_request_guard(page, settings.allowed_domains)
+                    install_request_guard(page)
 
-                    def record_navigation(response: Any) -> None:
+                    def record_navigation(
+                        response: Any,
+                        current_page: Any = page,
+                        status_holder: dict[str, int | None] = navigation_status,
+                    ) -> None:
                         try:
                             if (
                                 response.request.is_navigation_request()
-                                and response.frame == page.main_frame
+                                and response.frame == current_page.main_frame
                             ):
-                                navigation_status["value"] = response.status
+                                status_holder["value"] = response.status
                         except Exception:
                             return
 
@@ -500,14 +479,23 @@ def run_targets(
                         timeout=settings.navigation_timeout_ms,
                     )
                     result.initial_status = response.status if response else None
-                    previous_url = page.url
-                    navigation_status["value"] = None
-
-                    button = page.get_by_role(
+                    first_button = page.get_by_role(
                         "button", name=target.button_text, exact=True
                     ).first
-                    button.wait_for(state="visible", timeout=settings.click_timeout_ms)
-                    button.click(timeout=settings.click_timeout_ms)
+                    first_button.wait_for(
+                        state="visible", timeout=settings.click_timeout_ms
+                    )
+                    first_button.click(timeout=settings.click_timeout_ms)
+
+                    second_button = page.get_by_role(
+                        "button", name=target.second_button_text, exact=True
+                    ).first
+                    second_button.wait_for(
+                        state="visible", timeout=settings.click_timeout_ms
+                    )
+                    previous_url = page.url
+                    navigation_status["value"] = None
+                    second_button.click(timeout=settings.click_timeout_ms)
                     wait_for_redirect(
                         page, previous_url, settings.redirect_timeout_ms
                     )
@@ -533,6 +521,11 @@ def run_targets(
                             context.close()
                         except Exception:
                             pass
+                    if browser is not None:
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
                     result.duration_ms = round((time.monotonic() - started) * 1_000)
                     report.results.append(result)
 
@@ -550,25 +543,21 @@ def run_targets(
             report.success = False
         finally:
             report.finished_at = now_iso()
-            if browser is not None:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
     return report
 
 
 def main() -> int:
-    """Mode local facultatif avec une URL et un texte de bouton dans .env."""
+    """Mode local facultatif avec une URL et deux libellés dans .env."""
 
     try:
         base_dir = Path(__file__).resolve().parent
         settings = load_browser_settings(base_dir)
         target = Target(
-            url=validate_public_url(
-                required_env("TARGET_URL"), settings.allowed_domains
-            ),
+            url=validate_public_url(required_env("TARGET_URL")),
             button_text=validate_button_text(required_env("BUTTON_TEXT")),
+            second_button_text=validate_button_text(
+                required_env("SECOND_BUTTON_TEXT")
+            ),
         )
         report = run_targets(settings, [target])
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))

@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+proxies.txt
+*[Pp]roxy*.txt
+*[Pp]roxies*.txt
+*[Rr]ayobyte*.txt
+*.local.json
 .venv
 venv
 __pycache__

@@ -6,13 +6,14 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une lis
 2. contrôle son IP de sortie ;
 3. essaie une seule fois un second proxy distinct si ce contrôle échoue ;
 4. ouvre la page dans Chromium headless ;
-5. recherche un bouton par son texte visible exact ;
-6. effectue un seul clic ;
-7. attend que l’URL change ;
-8. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
-9. ferme le contexte de navigation avant de passer à l’URL suivante.
+5. recherche le bouton par son premier libellé visible exact et clique une fois ;
+6. attend que ce bouton affiche le second libellé exact ;
+7. clique une seconde fois ;
+8. attend que l’URL change ;
+9. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
+10. ferme complètement Chromium avant de passer à l’URL suivante.
 
-Il n’effectue aucun clic supplémentaire, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
+Il effectue exactement ces deux clics, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/IsholaRsk/Ghost-Clicker)
 
@@ -29,7 +30,8 @@ Ghost-Clicker/
 ├── .gitignore
 ├── requirements.txt
 └── tests/
-    └── test_main.py
+    ├── test_main.py
+    └── test_web.py
 ```
 
 ## Déploiement Render
@@ -46,37 +48,25 @@ Docker
 
 Le Blueprint utilise le plan Render **Starter** afin que la planification interne reste active. Un Web Service gratuit peut se mettre en veille et ne convient donc qu’aux lancements manuels.
 
-### 2. Renseigner seulement les variables demandées
+### 2. Préparer les deux fichiers
 
-Render demande :
-
-| Variable | Valeur |
-|---|---|
-| `PROXY_LIST_JSON` | liste JSON secrète des proxys autorisés |
-| `ALLOWED_DOMAINS` | domaines que vous êtes autorisé à tester, séparés par des virgules |
-
-Exemple de structure pour `PROXY_LIST_JSON` (remplacez les champs vides directement dans Render, jamais dans Git) :
-
-```json
-[
-  {"name":"us-1","server":"http://us-east.gw.rayobyte.com:8000","username":"","password":""},
-  {"name":"us-2","server":"http://us-east.gw.rayobyte.com:8000","username":"","password":""}
-]
-```
-
-Les noms doivent être uniques. Conservez dans chaque mot de passe les paramètres officiels Rayobyte nécessaires à la connexion.
-
-Exemple de domaines :
+Le fichier Rayobyte utilise exactement :
 
 ```text
-site1.example,site2.example
+username:password@host:port
 ```
 
-N’ajoutez ni `https://`, ni chemin dans `ALLOWED_DOMAINS`.
+Une ligne par proxy. Le fichier reste secret et n’est jamais ajouté à Git. Les doublons exacts sont ignorés.
 
-`ADMIN_TOKEN` est généré automatiquement. La liste de proxys reste uniquement dans les variables secrètes Render.
+Le fichier des cibles utilise :
 
-Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
+```text
+https://site-autorise.example/page | Continuer | Confirmer
+```
+
+Une ligne par URL, suivie du premier puis du second libellé exact du bouton. Après le premier clic, le bot attend que le second libellé apparaisse avant de cliquer à nouveau.
+
+`ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
 ### 3. Se connecter au bot
 
@@ -89,24 +79,16 @@ Après le build :
    - utilisateur : `admin` ;
    - mot de passe : valeur de `ADMIN_TOKEN`.
 
-## Modifier la liste des URL en ligne
+## Importer les listes en ligne
 
-Dans **Paramètres en ligne**, utilisez une ligne par visite :
+Après connexion :
 
-```text
-URL | texte exact du bouton
-```
+1. importez le fichier Rayobyte avec **Importer les proxys** ;
+2. importez le fichier des cibles avec **Importer les URL** ;
+3. vérifiez le nombre de proxys uniques affiché ;
+4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Exemple :
-
-```text
-https://site1.example/page | Continuer
-https://site2.example/offre | Voir le résultat
-```
-
-Le texte doit correspondre exactement au nom accessible d’un élément ayant le rôle `button`. Une URL hors de `ALLOWED_DOMAINS` est refusée.
-
-Cliquez sur **Enregistrer**. Aucun redéploiement n’est nécessaire pour modifier les chemins ou les textes des boutons.
+Les deux libellés après les séparateurs `|` doivent correspondre exactement aux noms accessibles successifs de l’élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer les listes.
 
 ## Lancer le bot
 
@@ -115,7 +97,7 @@ Deux modes sont disponibles :
 - **Lancer maintenant** : exécution manuelle ;
 - **Planification** : intervalle configurable entre 60 et 10080 minutes.
 
-Une seule exécution peut fonctionner à la fois. La planification et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
+Une seule exécution peut fonctionner à la fois. Les listes importées, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
 
 ## Résultats
 
@@ -125,7 +107,7 @@ L’interface affiche :
 - nom du proxy choisi et nombre de tentatives ;
 - IP et pays de sortie ;
 - URL initiale ;
-- texte du bouton ;
+- premier et second libellés du bouton ;
 - URL après redirection ;
 - réussite ou échec ;
 - message d’erreur.
@@ -156,15 +138,17 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Pour utiliser `main.py` avec une seule URL, remplissez aussi :
+Pour utiliser `main.py` avec une seule URL, créez `proxies.txt` au format Rayobyte indiqué plus haut, puis remplissez aussi :
 
 ```dotenv
+PROXY_LIST_FILE="proxies.txt"
 TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
+SECOND_BUTTON_TEXT="Confirmer"
 HEADLESS=false
 ```
 
-Puis :
+`proxies.txt` est ignoré par Git et doit rester local. Puis :
 
 ```powershell
 python .\main.py
@@ -174,12 +158,11 @@ python .\main.py
 
 - authentification HTTP Basic avec `ADMIN_TOKEN` ;
 - protection CSRF des formulaires ;
-- secrets uniquement dans les variables Render ou `.env` ;
-- liste blanche obligatoire de domaines ;
+- jeton administrateur uniquement dans les variables Render ou `.env` ;
+- fichier proxy secret conservé en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
-- redirections hors liste blanche bloquées ;
 - maximum de 50 URL ;
-- un clic explicite maximum par URL ;
+- au maximum deux clics explicites par URL, un pour chaque libellé configuré ;
 - fréquence planifiée minimale de 60 minutes ;
 - choix aléatoire limité au pool explicitement autorisé ;
 - une seule reprise avec un proxy distinct lorsque le contrôle IP échoue ;

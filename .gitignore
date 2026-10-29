@@ -11,8 +11,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Paramètres/résultats locaux
+# Paramètres/résultats locaux et exports fournisseur secrets
 *.local.json
+proxies.txt
+*[Pp]roxy*.txt
+*[Pp]roxies*.txt
+*[Rr]ayobyte*.txt
 
 # IDE et système
 .vscode/
