@@ -1,4 +1,3 @@
-import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,22 +6,14 @@ from unittest import mock
 import main
 
 
-def make_settings(proxies=None):
+def make_settings(gateway=None):
     return main.BrowserSettings(
-        proxies=proxies
-        or (
-            main.ProxyConfig(
-                "proxy-001",
-                "http://proxy-one.example:8000",
-                "SENSITIVE_USER_MARKER",
-                "SENSITIVE_PASSWORD_MARKER",
-            ),
-            main.ProxyConfig(
-                "proxy-002",
-                "http://proxy-two.example:8001",
-                "SECOND_USER_MARKER",
-                "SECOND_PASSWORD_MARKER",
-            ),
+        gateway=gateway
+        or main.ProxyConfig(
+            "passerelle-rotative",
+            "http://proxy-gateway.example:8000",
+            "SENSITIVE_USER_MARKER",
+            "SENSITIVE_PASSWORD_MARKER",
         ),
         ip_check_url="https://ipinfo.io/json",
         headless=True,
@@ -71,80 +62,78 @@ class ValidationTests(unittest.TestCase):
             )
 
 
-class ProxyFileTests(unittest.TestCase):
-    def proxy_line(self, suffix, port):
-        return f"sample-user-{suffix}:sample-pass-{suffix}@proxy-{suffix}.example:{port}"
-
-    def test_parses_rayobyte_lines_and_ignores_exact_duplicates(self):
-        first = self.proxy_line("one", 8000)
-        second = self.proxy_line("two", 8001)
-        proxies = main.parse_proxy_list_text(
-            f"# export\n{first}\n\n{first}\n{second}\n"
+class ProxyGatewayFileTests(unittest.TestCase):
+    def gateway_line(self, suffix="gateway", port=8000):
+        return (
+            f"sample-user-{suffix}:sample-pass-{suffix}"
+            f"@proxy-{suffix}.example:{port}"
         )
 
-        self.assertEqual(len(proxies), 2)
-        self.assertEqual(proxies[0].name, "proxy-001")
-        self.assertEqual(proxies[0].server, "http://proxy-one.example:8000")
-        self.assertEqual(proxies[0].username, "sample-user-one")
-        self.assertEqual(proxies[0].password, "sample-pass-one")
-        self.assertEqual(proxies[1].name, "proxy-002")
+    def test_parses_one_rotating_gateway(self):
+        gateway = main.parse_proxy_gateway_text(
+            f"# passerelle\n{self.gateway_line()}\n"
+        )
 
-    def test_rejects_invalid_or_empty_proxy_files_without_echoing_the_line(self):
+        self.assertEqual(gateway.name, "passerelle-rotative")
+        self.assertEqual(gateway.server, "http://proxy-gateway.example:8000")
+        self.assertEqual(gateway.username, "sample-user-gateway")
+        self.assertEqual(gateway.password, "sample-pass-gateway")
+
+    def test_rejects_a_list_with_more_than_one_gateway(self):
+        content = (
+            f"{self.gateway_line('one', 8000)}\n"
+            f"{self.gateway_line('two', 8001)}\n"
+        )
+        with self.assertRaises(main.ConfigurationError) as raised:
+            main.parse_proxy_gateway_text(content)
+        self.assertIn("une seule passerelle", str(raised.exception))
+
+    def test_rejects_invalid_or_empty_gateway_without_echoing_the_line(self):
         invalid = "SENSITIVE_INVALID_LINE"
         with self.assertRaises(main.ConfigurationError) as raised:
-            main.parse_proxy_list_text(invalid)
+            main.parse_proxy_gateway_text(invalid)
         self.assertNotIn(invalid, str(raised.exception))
 
         with self.assertRaises(main.ConfigurationError):
-            main.parse_proxy_list_text("# commentaire uniquement\n")
-
-    def test_limits_file_to_one_hundred_unique_proxies(self):
-        content = "\n".join(
-            self.proxy_line(str(index), 8000 + index) for index in range(101)
-        )
-        with self.assertRaises(main.ConfigurationError):
-            main.parse_proxy_list_text(content)
+            main.parse_proxy_gateway_text("# commentaire uniquement\n")
 
     def test_loads_utf8_bom_file(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            path = Path(temporary_directory) / "proxies.txt"
+            path = Path(temporary_directory) / "proxy-gateway.txt"
             path.write_text(
-                "\ufeff" + self.proxy_line("one", 8000), encoding="utf-8"
+                "\ufeff" + self.gateway_line(), encoding="utf-8"
             )
-            proxies = main.load_proxy_file(path)
-        self.assertEqual(len(proxies), 1)
+            gateway = main.load_proxy_gateway(path)
+        self.assertEqual(gateway.name, "passerelle-rotative")
 
     def test_missing_file_has_an_upload_instruction(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             missing = Path(temporary_directory) / "missing.txt"
             with self.assertRaises(main.ConfigurationError) as raised:
-                main.load_proxy_file(missing)
-        self.assertIn("Téléversez", str(raised.exception))
+                main.load_proxy_gateway(missing)
+        self.assertIn("Enregistrez", str(raised.exception))
 
 
 class SecurityTests(unittest.TestCase):
     def test_redacts_all_proxy_credentials(self):
         settings = make_settings()
         message = main.redact_error(
-            "SENSITIVE_USER_MARKER:SENSITIVE_PASSWORD_MARKER "
-            "SECOND_USER_MARKER SECOND_PASSWORD_MARKER at "
+            "SENSITIVE_USER_MARKER:SENSITIVE_PASSWORD_MARKER at "
             "http://SENSITIVE_USER_MARKER:SENSITIVE_PASSWORD_MARKER@proxy.test:8000",
             settings,
         )
         for secret in (
             "SENSITIVE_USER_MARKER",
             "SENSITIVE_PASSWORD_MARKER",
-            "SECOND_USER_MARKER",
-            "SECOND_PASSWORD_MARKER",
         ):
             self.assertNotIn(secret, message)
         self.assertIn("***", message)
 
     def test_playwright_proxy_configuration(self):
         self.assertEqual(
-            make_settings().proxies[0].playwright_proxy(),
+            make_settings().gateway.playwright_proxy(),
             {
-                "server": "http://proxy-one.example:8000",
+                "server": "http://proxy-gateway.example:8000",
                 "username": "SENSITIVE_USER_MARKER",
                 "password": "SENSITIVE_PASSWORD_MARKER",
             },
@@ -187,17 +176,8 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(private_route.action, "blockedbyclient")
 
 
-class ProxySelectionTests(unittest.TestCase):
-    def test_selects_two_distinct_candidates_at_most(self):
-        proxies = [
-            main.ProxyConfig(f"proxy-{index}", f"http://proxy.test:{8000 + index}")
-            for index in range(5)
-        ]
-        selected = main.choose_proxy_candidates(proxies, random.Random(42))
-        self.assertEqual(len(selected), 2)
-        self.assertNotEqual(selected[0].name, selected[1].name)
-
-    def test_retries_once_with_a_distinct_proxy_after_check_failure(self):
+class ProxyGatewayRetryTests(unittest.TestCase):
+    def test_retries_same_gateway_once_with_a_new_context(self):
         class FakeResponse:
             def __init__(self, status):
                 self.status = status
@@ -232,8 +212,10 @@ class ProxySelectionTests(unittest.TestCase):
         class FakeBrowser:
             def __init__(self):
                 self.contexts = []
+                self.proxy_configurations = []
 
-            def new_context(self, **_kwargs):
+            def new_context(self, **kwargs):
+                self.proxy_configurations.append(kwargs["proxy"])
                 status = 500 if not self.contexts else 200
                 context = FakeContext(status)
                 self.contexts.append(context)
@@ -247,12 +229,15 @@ class ProxySelectionTests(unittest.TestCase):
         )
         browser = FakeBrowser()
         context, _page = main.open_verified_proxy_context(
-            browser, make_settings(), result, random.Random(4)
+            browser, make_settings(), result
         )
         self.assertEqual(result.proxy_attempts, 2)
         self.assertEqual(result.exit_ip, "203.0.113.20")
         self.assertTrue(browser.contexts[0].closed)
         self.assertIs(context, browser.contexts[1])
+        self.assertEqual(
+            browser.proxy_configurations[0], browser.proxy_configurations[1]
+        )
 
     def test_stops_after_two_failed_proxy_checks(self):
         class FakeResponse:
@@ -289,9 +274,7 @@ class ProxySelectionTests(unittest.TestCase):
         )
         browser = FakeBrowser()
         with self.assertRaises(RuntimeError):
-            main.open_verified_proxy_context(
-                browser, make_settings(), result, random.Random(4)
-            )
+            main.open_verified_proxy_context(browser, make_settings(), result)
         self.assertEqual(result.proxy_attempts, 2)
         self.assertTrue(all(context.closed for context in browser.contexts))
 
@@ -404,23 +387,14 @@ class BrowserLifecycleTests(unittest.TestCase):
 
         chromium = FakeChromium()
         manager = FakePlaywrightManager(chromium)
-        settings = make_settings(
-            proxies=(
-                main.ProxyConfig(
-                    "proxy-001",
-                    "http://proxy-one.example:8000",
-                    "SENSITIVE_USER_MARKER",
-                    "SENSITIVE_PASSWORD_MARKER",
-                ),
-            )
-        )
+        settings = make_settings()
         targets = [
             main.Target("https://one.example/page", "Continuer", "Confirmer"),
             main.Target("https://two.example/page", "Valider", "Terminer"),
         ]
 
         with mock.patch("playwright.sync_api.sync_playwright", return_value=manager):
-            report = main.run_targets(settings, targets, random.Random(2))
+            report = main.run_targets(settings, targets)
 
         self.assertTrue(report.success)
         self.assertEqual(len(chromium.browsers), 2)

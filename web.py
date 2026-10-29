@@ -23,7 +23,7 @@ from main import (
     ConfigurationError,
     Target,
     load_browser_settings,
-    parse_proxy_list_text,
+    parse_proxy_gateway_text,
     run_targets,
     validate_button_text,
     validate_public_url,
@@ -67,8 +67,10 @@ def reports_path() -> Path:
     return storage_path("REPORTS_FILE", "/tmp/ghost-clicker-reports.json")
 
 
-def proxy_file_path() -> Path:
-    return storage_path("PROXY_LIST_FILE", "/tmp/ghost-clicker-proxies.txt")
+def proxy_gateway_file_path() -> Path:
+    return storage_path(
+        "PROXY_GATEWAY_FILE", "/tmp/ghost-clicker-proxy-gateway.txt"
+    )
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -100,7 +102,7 @@ def atomic_write_private_text(path: Path, value: str) -> None:
         os.chmod(path, 0o600)
     except OSError as exc:
         raise ConfigurationError(
-            "Impossible d'enregistrer le fichier de proxys."
+            "Impossible d'enregistrer la passerelle proxy."
         ) from exc
     finally:
         if temporary_path is not None:
@@ -336,14 +338,18 @@ def read_uploaded_text(field_name: str) -> str:
         raise ConfigurationError("Le fichier doit être encodé en UTF-8.") from exc
 
 
-@APP.post("/upload-proxies")
-def upload_proxies() -> Response:
+@APP.post("/gateway")
+def save_gateway() -> Response:
     try:
         require_csrf()
-        content = read_uploaded_text("proxy_file")
-        proxies = parse_proxy_list_text(content)
-        atomic_write_private_text(proxy_file_path(), content)
-        return redirect(url_for("home", proxies=str(len(proxies))), code=303)
+        content = request.form.get("gateway", "").strip()
+        if not content:
+            raise ConfigurationError("Saisissez la passerelle proxy.")
+        if len(content) > 4_096:
+            raise ConfigurationError("La passerelle proxy est trop longue.")
+        parse_proxy_gateway_text(content)
+        atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+        return redirect(url_for("home", gateway="1"), code=303)
     except ConfigurationError as exc:
         return redirect(url_for("home", error=str(exc)), code=303)
 
@@ -508,7 +514,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
 @APP.get("/")
 def home() -> str:
     app_settings = load_app_settings()
-    browser_settings, configuration_error = read_browser_configuration()
+    _browser_settings, configuration_error = read_browser_configuration()
     reports = load_reports()
     with STATE_LOCK:
         state = dict(RUN_STATE)
@@ -516,8 +522,8 @@ def home() -> str:
     messages: list[str] = []
     if request.args.get("saved") == "1":
         messages.append("Paramètres enregistrés.")
-    if request.args.get("proxies"):
-        messages.append(f"{request.args['proxies']} proxy(s) unique(s) importé(s).")
+    if request.args.get("gateway") == "1":
+        messages.append("Passerelle proxy rotative enregistrée.")
     if request.args.get("targets"):
         messages.append(f"{request.args['targets']} cible(s) importée(s).")
     if request.args.get("started") == "1":
@@ -543,7 +549,9 @@ def home() -> str:
     checked = " checked" if app_settings.get("schedule_enabled") else ""
     targets_text = html.escape(targets_to_text(app_settings))
     interval = int(app_settings.get("interval_minutes", 60))
-    proxy_count = len(browser_settings.proxies) if browser_settings is not None else 0
+    gateway_status = (
+        "configurée" if proxy_gateway_file_path().exists() else "absente"
+    )
 
     return f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -552,17 +560,17 @@ def home() -> str:
 *{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 8% 0,#173d5e,var(--bg) 38%);color:var(--text);font:14px/1.55 Segoe UI,Arial,sans-serif;min-height:100vh}}
 main{{max-width:1200px;margin:auto;padding:30px 20px}}h1{{font-size:32px;margin:0}}h1 span{{color:var(--accent)}}p{{color:var(--muted)}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.card{{background:linear-gradient(145deg,#132c47,var(--panel));border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}}
-label{{display:block;font-weight:700;margin:11px 0 5px}}textarea,input[type=number],input[type=file]{{width:100%;background:#081827;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px;font:inherit}}textarea{{min-height:190px;resize:vertical}}
+label{{display:block;font-weight:700;margin:11px 0 5px}}textarea,input[type=number],input[type=file],input[type=password]{{width:100%;background:#081827;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px;font:inherit}}textarea{{min-height:190px;resize:vertical}}
 button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15px;margin:8px 8px 0 0;font-weight:750;text-decoration:none;cursor:pointer}}button{{background:var(--accent);color:#06141d}}button.secondary,a.button{{background:var(--blue);color:#07111f}}button.danger{{background:var(--red)}}button:disabled{{opacity:.4;cursor:not-allowed}}
 .notice{{padding:11px 14px;margin:10px 0;border-left:3px solid var(--blue);background:#10243a;color:#dce8f4}}code{{color:#b6f7e8}}.meta{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.meta div{{background:#0b1b2b;padding:12px;border-radius:10px}}.meta small{{display:block;color:var(--muted)}}
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy aléatoire vérifié par URL, deux clics explicites sur le bouton aux libellés configurés, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites sur le bouton aux libellés configurés, puis attente de redirection.</p>
 {message_html}
-<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Proxys uniques</small><strong>{proxy_count}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
-<section class="card"><h2>Importer les deux listes</h2><div class="grid">
-<form method="post" action="{url_for('upload_proxies')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier Rayobyte — username:password@host:port</label><input type="file" name="proxy_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les proxys</button></form>
+<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
+<section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
+<form method="post" action="{url_for('save_gateway')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Passerelle Rayobyte — username:password@host:port</label><input type="password" name="gateway" autocomplete="off" required><button type="submit"{edit_disabled}>Enregistrer la passerelle</button></form>
 <form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé | second libellé</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
 </div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
@@ -572,7 +580,7 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, un proxy est choisi aléatoirement et contrôlé. En cas d’échec du contrôle, un second proxy distinct est essayé une seule fois. Le premier libellé est cliqué, le bot attend le second libellé, clique une seconde fois, puis attend la redirection.</p>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le premier libellé est cliqué, le bot attend le second libellé, clique une seconde fois, puis attend la redirection.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
