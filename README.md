@@ -6,13 +6,14 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une lis
 2. contrôle son IP de sortie ;
 3. essaie une seule fois un second proxy distinct si ce contrôle échoue ;
 4. ouvre la page dans Chromium headless ;
-5. recherche un bouton par son texte visible exact ;
-6. effectue un seul clic ;
-7. attend que l’URL change ;
-8. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
-9. ferme complètement Chromium avant de passer à l’URL suivante.
+5. recherche le bouton par son premier libellé visible exact et clique une fois ;
+6. attend que ce bouton affiche le second libellé exact ;
+7. clique une seconde fois ;
+8. attend que l’URL change ;
+9. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
+10. ferme complètement Chromium avant de passer à l’URL suivante.
 
-Il n’effectue aucun clic supplémentaire, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
+Il effectue exactement ces deux clics, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/IsholaRsk/Ghost-Clicker)
 
@@ -60,10 +61,10 @@ Une ligne par proxy. Le fichier reste secret et n’est jamais ajouté à Git. L
 Le fichier des cibles utilise :
 
 ```text
-https://site-autorise.example/page | Continuer
+https://site-autorise.example/page | Continuer | Confirmer
 ```
 
-Une ligne par URL, suivie de `|` puis du texte exact du bouton.
+Une ligne par URL, suivie du premier puis du second libellé exact du bouton. Après le premier clic, le bot attend que le second libellé apparaisse avant de cliquer à nouveau.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -87,7 +88,7 @@ Après connexion :
 3. vérifiez le nombre de proxys uniques affiché ;
 4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Le texte après `|` doit correspondre exactement au nom accessible d’un élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer les listes.
+Les deux libellés après les séparateurs `|` doivent correspondre exactement aux noms accessibles successifs de l’élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer les listes.
 
 ## Lancer le bot
 
@@ -106,7 +107,7 @@ L’interface affiche :
 - nom du proxy choisi et nombre de tentatives ;
 - IP et pays de sortie ;
 - URL initiale ;
-- texte du bouton ;
+- premier et second libellés du bouton ;
 - URL après redirection ;
 - réussite ou échec ;
 - message d’erreur.
@@ -143,6 +144,7 @@ Pour utiliser `main.py` avec une seule URL, créez `proxies.txt` au format Rayob
 PROXY_LIST_FILE="proxies.txt"
 TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
+SECOND_BUTTON_TEXT="Confirmer"
 HEADLESS=false
 ```
 
@@ -160,7 +162,7 @@ python .\main.py
 - fichier proxy secret conservé en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
-- un clic explicite maximum par URL ;
+- au maximum deux clics explicites par URL, un pour chaque libellé configuré ;
 - fréquence planifiée minimale de 60 minutes ;
 - choix aléatoire limité au pool explicitement autorisé ;
 - une seule reprise avec un proxy distinct lorsque le contrôle IP échoue ;

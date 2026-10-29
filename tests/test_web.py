@@ -92,8 +92,8 @@ class WebUploadTests(unittest.TestCase):
             {"targets": [], "schedule_enabled": True, "interval_minutes": 120}
         )
         content = (
-            "https://first.example/page | Continuer\n"
-            "https://unrelated.example.org/other | Valider\n"
+            "https://first.example/page | Continuer | Confirmer\n"
+            "https://unrelated.example.org/other | Valider | Terminer\n"
         )
 
         response = self.post_file(
@@ -104,15 +104,42 @@ class WebUploadTests(unittest.TestCase):
         query = parse_qs(urlsplit(response.headers["Location"]).query)
         self.assertEqual(query["targets"], ["2"])
         settings = web.load_app_settings()
-        self.assertEqual(len(settings["targets"]), 2)
+        self.assertEqual(
+            settings["targets"],
+            [
+                {
+                    "url": "https://first.example/page",
+                    "button_text": "Continuer",
+                    "second_button_text": "Confirmer",
+                },
+                {
+                    "url": "https://unrelated.example.org/other",
+                    "button_text": "Valider",
+                    "second_button_text": "Terminer",
+                },
+            ],
+        )
         self.assertTrue(settings["schedule_enabled"])
         self.assertEqual(settings["interval_minutes"], 120)
+
+    def test_target_upload_requires_both_successive_button_labels(self):
+        response = self.post_file(
+            "/upload-targets",
+            "target_file",
+            "https://first.example/page | Continuer\n",
+            "targets.txt",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        query = parse_qs(urlsplit(response.headers["Location"]).query)
+        self.assertIn("error", query)
+        self.assertEqual(web.load_app_settings()["targets"], [])
 
     def test_targets_remain_editable_online_after_file_upload(self):
         self.post_file(
             "/upload-targets",
             "target_file",
-            "https://first.example/page | Continuer\n",
+            "https://first.example/page | Continuer | Confirmer\n",
             "targets.txt",
         )
 
@@ -120,7 +147,9 @@ class WebUploadTests(unittest.TestCase):
             "/settings",
             data={
                 "csrf_token": web.CSRF_TOKEN,
-                "targets": "https://edited.example/page | Confirmer",
+                "targets": (
+                    "https://edited.example/page | Continuer | Confirmer"
+                ),
                 "interval_minutes": "60",
             },
             headers=self.headers,
@@ -134,7 +163,8 @@ class WebUploadTests(unittest.TestCase):
             [
                 {
                     "url": "https://edited.example/page",
-                    "button_text": "Confirmer",
+                    "button_text": "Continuer",
+                    "second_button_text": "Confirmer",
                 }
             ],
         )

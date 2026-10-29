@@ -166,6 +166,9 @@ def targets_from_settings(value: dict[str, Any]) -> list[Target]:
             Target(
                 url=validate_public_url(str(item.get("url", ""))),
                 button_text=validate_button_text(str(item.get("button_text", ""))),
+                second_button_text=validate_button_text(
+                    str(item.get("second_button_text", ""))
+                ),
             )
         )
     return targets
@@ -177,15 +180,18 @@ def parse_targets_text(value: str) -> list[Target]:
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        if "|" not in line:
+        parts = line.split("|", maxsplit=2)
+        if len(parts) != 3:
             raise ConfigurationError(
-                f"Ligne {line_number} : utilisez le format URL | texte du bouton."
+                f"Ligne {line_number} : utilisez le format "
+                "URL | premier libellé | second libellé."
             )
-        url, button_text = line.split("|", maxsplit=1)
+        url, button_text, second_button_text = parts
         targets.append(
             Target(
                 url=validate_public_url(url),
                 button_text=validate_button_text(button_text),
+                second_button_text=validate_button_text(second_button_text),
             )
         )
     if len(targets) > 50:
@@ -197,7 +203,10 @@ def targets_to_text(value: dict[str, Any]) -> str:
     lines: list[str] = []
     for item in value.get("targets", []):
         if isinstance(item, dict):
-            lines.append(f"{item.get('url', '')} | {item.get('button_text', '')}")
+            lines.append(
+                f"{item.get('url', '')} | {item.get('button_text', '')} | "
+                f"{item.get('second_button_text', '')}"
+            )
     return "\n".join(lines)
 
 
@@ -347,7 +356,11 @@ def upload_targets() -> Response:
         targets = parse_targets_text(content)
         current = load_app_settings()
         current["targets"] = [
-            {"url": target.url, "button_text": target.button_text}
+            {
+                "url": target.url,
+                "button_text": target.button_text,
+                "second_button_text": target.second_button_text,
+            }
             for target in targets
         ]
         save_app_settings(current)
@@ -373,7 +386,11 @@ def update_settings() -> Response:
         save_app_settings(
             {
                 "targets": [
-                    {"url": target.url, "button_text": target.button_text}
+                    {
+                        "url": target.url,
+                        "button_text": target.button_text,
+                        "second_button_text": target.second_button_text,
+                    }
                     for target in targets
                 ],
                 "schedule_enabled": request.form.get("schedule_enabled") == "on",
@@ -426,7 +443,8 @@ def download_results() -> Response:
             "ip_sortie",
             "pays",
             "url_initiale",
-            "texte_bouton",
+            "premier_libelle",
+            "second_libelle",
             "url_finale",
             "statut_initial",
             "statut_final",
@@ -447,6 +465,7 @@ def download_results() -> Response:
                     result.get("proxy_country", ""),
                     result.get("initial_url", ""),
                     result.get("button_text", ""),
+                    result.get("second_button_text", ""),
                     result.get("final_url", ""),
                     result.get("initial_status", ""),
                     result.get("final_status", ""),
@@ -477,12 +496,13 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                   <td>{html.escape(str(result.get('proxy_name', '')))}</td>
                   <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
                   <td>{html.escape(str(result.get('button_text', '')))}</td>
+                  <td>{html.escape(str(result.get('second_button_text', '')))}</td>
                   <td class="url">{html.escape(str(result.get('final_url', '')))}</td>
                   <td><span class="badge {css_class}">{label}</span></td>
                   <td class="error">{html.escape(str(result.get('error', '')))}</td>
                 </tr>"""
             )
-    return "".join(rows) or '<tr><td colspan="8" class="empty">Aucun résultat.</td></tr>'
+    return "".join(rows) or '<tr><td colspan="9" class="empty">Aucun résultat.</td></tr>'
 
 
 @APP.get("/")
@@ -538,26 +558,26 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy aléatoire vérifié par URL, un clic explicite, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : un proxy aléatoire vérifié par URL, deux clics explicites sur le bouton aux libellés configurés, puis attente de redirection.</p>
 {message_html}
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Proxys uniques</small><strong>{proxy_count}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Importer les deux listes</h2><div class="grid">
 <form method="post" action="{url_for('upload_proxies')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier Rayobyte — username:password@host:port</label><input type="file" name="proxy_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les proxys</button></form>
-<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | texte exact du bouton</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
+<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé | second libellé</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
 </div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
 <form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-<label for="targets">Une ligne par visite : URL | texte exact du bouton</label>
-<textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer">{targets_text}</textarea>
+<label for="targets">Une ligne par visite : URL | premier libellé exact | second libellé exact</label>
+<textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, un proxy est choisi aléatoirement et contrôlé. En cas d’échec du contrôle, un second proxy distinct est essayé une seule fois. Chaque URL reçoit au maximum un clic.</p>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, un proxy est choisi aléatoirement et contrôlé. En cas d’échec du contrôle, un second proxy distinct est essayé une seule fois. Le premier libellé est cliqué, le bot attend le second libellé, clique une seconde fois, puis attend la redirection.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
 <p>Les listes, paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
-<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Proxy</th><th>URL initiale</th><th>Bouton</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
+<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
 </main></body></html>"""
 
 

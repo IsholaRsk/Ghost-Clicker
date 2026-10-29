@@ -243,6 +243,7 @@ class ProxySelectionTests(unittest.TestCase):
             started_at="now",
             initial_url="https://example.com/",
             button_text="Continuer",
+            second_button_text="Confirmer",
         )
         browser = FakeBrowser()
         context, _page = main.open_verified_proxy_context(
@@ -283,7 +284,9 @@ class ProxySelectionTests(unittest.TestCase):
                 self.contexts.append(context)
                 return context
 
-        result = main.VisitResult("now", "https://example.com/", "Continuer")
+        result = main.VisitResult(
+            "now", "https://example.com/", "Continuer", "Confirmer"
+        )
         browser = FakeBrowser()
         with self.assertRaises(RuntimeError):
             main.open_verified_proxy_context(
@@ -308,21 +311,24 @@ class BrowserLifecycleTests(unittest.TestCase):
                 return "{}"
 
         class FakeButton:
-            def __init__(self, page):
+            def __init__(self, page, name):
                 self.page = page
+                self.name = name
                 self.first = self
 
             def wait_for(self, **_kwargs):
                 return None
 
             def click(self, **_kwargs):
-                self.page.clicks += 1
-                self.page.url += "/redirected"
+                self.page.clicked_labels.append(self.name)
+                if len(self.page.clicked_labels) == 2:
+                    self.page.url += "/redirected"
 
         class FakePage:
             def __init__(self):
                 self.url = "about:blank"
-                self.clicks = 0
+                self.clicked_labels = []
+                self.role_requests = []
                 self.main_frame = object()
 
             def route(self, _pattern, callback):
@@ -341,8 +347,8 @@ class BrowserLifecycleTests(unittest.TestCase):
                 return None
 
             def get_by_role(self, role, name, exact):
-                self.role_request = (role, name, exact)
-                return FakeButton(self)
+                self.role_requests.append((role, name, exact))
+                return FakeButton(self, name)
 
             def wait_for_load_state(self, *_args, **_kwargs):
                 return None
@@ -409,8 +415,8 @@ class BrowserLifecycleTests(unittest.TestCase):
             )
         )
         targets = [
-            main.Target("https://one.example/page", "Continuer"),
-            main.Target("https://two.example/page", "Valider"),
+            main.Target("https://one.example/page", "Continuer", "Confirmer"),
+            main.Target("https://two.example/page", "Valider", "Terminer"),
         ]
 
         with mock.patch("playwright.sync_api.sync_playwright", return_value=manager):
@@ -419,12 +425,21 @@ class BrowserLifecycleTests(unittest.TestCase):
         self.assertTrue(report.success)
         self.assertEqual(len(chromium.browsers), 2)
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
-        for browser in chromium.browsers:
+        for browser, target in zip(chromium.browsers, targets, strict=True):
             self.assertEqual(len(browser.contexts), 1)
             self.assertTrue(browser.contexts[0].closed)
-            self.assertEqual(browser.contexts[0].page.clicks, 1)
-            self.assertEqual(browser.contexts[0].page.role_request[0], "button")
-            self.assertTrue(browser.contexts[0].page.role_request[2])
+            page = browser.contexts[0].page
+            self.assertEqual(
+                page.clicked_labels,
+                [target.button_text, target.second_button_text],
+            )
+            self.assertEqual(
+                page.role_requests,
+                [
+                    ("button", target.button_text, True),
+                    ("button", target.second_button_text, True),
+                ],
+            )
 
 
 class RedirectTests(unittest.TestCase):

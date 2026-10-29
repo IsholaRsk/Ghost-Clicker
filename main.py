@@ -1,4 +1,4 @@
-"""Moteur Playwright : un proxy vérifié et un clic par URL publique."""
+"""Moteur Playwright : un proxy vérifié et deux clics par URL publique."""
 
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ class BrowserSettings:
 class Target:
     url: str
     button_text: str
+    second_button_text: str
 
 
 @dataclass
@@ -58,6 +59,7 @@ class VisitResult:
     started_at: str
     initial_url: str
     button_text: str
+    second_button_text: str
     proxy_name: str = ""
     proxy_attempts: int = 0
     exit_ip: str = ""
@@ -440,6 +442,7 @@ def run_targets(
                     started_at=now_iso(),
                     initial_url=target.url,
                     button_text=target.button_text,
+                    second_button_text=target.second_button_text,
                 )
                 browser = None
                 context = None
@@ -476,14 +479,23 @@ def run_targets(
                         timeout=settings.navigation_timeout_ms,
                     )
                     result.initial_status = response.status if response else None
-                    previous_url = page.url
-                    navigation_status["value"] = None
-
-                    button = page.get_by_role(
+                    first_button = page.get_by_role(
                         "button", name=target.button_text, exact=True
                     ).first
-                    button.wait_for(state="visible", timeout=settings.click_timeout_ms)
-                    button.click(timeout=settings.click_timeout_ms)
+                    first_button.wait_for(
+                        state="visible", timeout=settings.click_timeout_ms
+                    )
+                    first_button.click(timeout=settings.click_timeout_ms)
+
+                    second_button = page.get_by_role(
+                        "button", name=target.second_button_text, exact=True
+                    ).first
+                    second_button.wait_for(
+                        state="visible", timeout=settings.click_timeout_ms
+                    )
+                    previous_url = page.url
+                    navigation_status["value"] = None
+                    second_button.click(timeout=settings.click_timeout_ms)
                     wait_for_redirect(
                         page, previous_url, settings.redirect_timeout_ms
                     )
@@ -535,7 +547,7 @@ def run_targets(
 
 
 def main() -> int:
-    """Mode local facultatif avec une URL et un texte de bouton dans .env."""
+    """Mode local facultatif avec une URL et deux libellés dans .env."""
 
     try:
         base_dir = Path(__file__).resolve().parent
@@ -543,6 +555,9 @@ def main() -> int:
         target = Target(
             url=validate_public_url(required_env("TARGET_URL")),
             button_text=validate_button_text(required_env("BUTTON_TEXT")),
+            second_button_text=validate_button_text(
+                required_env("SECOND_BUTTON_TEXT")
+            ),
         )
         report = run_targets(settings, [target])
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
