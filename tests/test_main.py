@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,22 @@ class ProxyGatewayFileTests(unittest.TestCase):
             f"sample-user-{suffix}:sample-pass-{suffix}"
             f"@proxy-{suffix}.example:{port}"
         )
+
+    def test_engine_uses_the_ephemeral_default_gateway_path(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                main.proxy_gateway_path(Path("/app")),
+                Path(main.DEFAULT_PROXY_GATEWAY_FILE),
+            )
+
+    def test_relative_gateway_path_remains_relative_to_the_application(self):
+        with mock.patch.dict(
+            os.environ, {"PROXY_GATEWAY_FILE": "proxy-gateway.txt"}, clear=True
+        ):
+            self.assertEqual(
+                main.proxy_gateway_path(Path("/app")),
+                Path("/app/proxy-gateway.txt"),
+            )
 
     def test_parses_one_rotating_gateway(self):
         gateway = main.parse_proxy_gateway_text(

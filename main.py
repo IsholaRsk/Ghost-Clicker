@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+DEFAULT_PROXY_GATEWAY_FILE = "/tmp/ghost-clicker-proxy-gateway.txt"
+
 
 class ConfigurationError(ValueError):
     """Configuration absente ou invalide."""
@@ -254,6 +256,11 @@ def validate_button_text(value: str) -> str:
     return text
 
 
+def proxy_gateway_path(base_dir: Path) -> Path:
+    path = Path(os.getenv("PROXY_GATEWAY_FILE", DEFAULT_PROXY_GATEWAY_FILE))
+    return path if path.is_absolute() else base_dir / path
+
+
 def load_browser_settings(base_dir: Path) -> BrowserSettings:
     try:
         from dotenv import load_dotenv
@@ -263,11 +270,8 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
         ) from exc
     load_dotenv(base_dir / ".env", override=False)
 
-    gateway_path = Path(os.getenv("PROXY_GATEWAY_FILE", "proxy-gateway.txt"))
-    if not gateway_path.is_absolute():
-        gateway_path = base_dir / gateway_path
     return BrowserSettings(
-        gateway=load_proxy_gateway(gateway_path),
+        gateway=load_proxy_gateway(proxy_gateway_path(base_dir)),
         ip_check_url=validate_public_url(
             os.getenv("IP_CHECK_URL", "https://ipinfo.io/json")
         ),
