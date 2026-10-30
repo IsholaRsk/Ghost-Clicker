@@ -370,39 +370,40 @@ def install_request_guard(page: Any) -> None:
     page.route("**/*", handle)
 
 
-def closest_clickable_target(text_target: Any) -> Any:
-    """Préfère le bouton ou lien parent du nœud qui porte le texte."""
-
-    clickable = text_target.locator(
-        "xpath=ancestor-or-self::*[self::button or self::a "
-        "or @role='button' or @role='link'][1]"
-    )
-    return clickable.first if clickable.count() else text_target
-
-
 def normalize_visible_text(value: str) -> str:
     return " ".join(value.split())
 
 
-def wait_for_element_text_change(
-    page: Any, element: Any, previous_text: str, timeout_ms: int
+def visible_text_at_point(page: Any, x: float, y: float) -> str:
+    value = page.evaluate(
+        """({x, y}) => {
+            const element = document.elementFromPoint(x, y);
+            if (!element) return '';
+            const clickable = element.closest(
+                'button, a, [role="button"], [role="link"]'
+            );
+            const source = clickable || element;
+            return source.innerText || source.textContent || '';
+        }""",
+        {"x": x, "y": y},
+    )
+    return normalize_visible_text(str(value or ""))
+
+
+def wait_for_text_change_at_point(
+    page: Any, x: float, y: float, previous_text: str, timeout_ms: int
 ) -> str:
-    """Attend que le même élément affiche un texte non vide différent."""
+    """Attend que le contenu visible au même emplacement change."""
 
     previous = normalize_visible_text(previous_text)
     deadline = time.monotonic() + (timeout_ms / 1_000)
     while True:
-        try:
-            current = normalize_visible_text(element.inner_text())
-        except Exception as exc:
-            raise RuntimeError(
-                "L'élément du premier clic a été remplacé avant le second clic."
-            ) from exc
+        current = visible_text_at_point(page, x, y)
         if current and current != previous:
             return current
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                "Le libellé de l'élément cliquable n'a pas changé après le premier clic."
+                "Le contenu du bouton n'a pas changé après le premier clic."
             )
         page.wait_for_timeout(250)
 
@@ -548,26 +549,29 @@ def run_targets(
                     first_click_target.wait_for(
                         state="visible", timeout=settings.click_timeout_ms
                     )
-                    first_click_target = closest_clickable_target(first_click_target)
-                    first_click_target.wait_for(
-                        state="visible", timeout=settings.click_timeout_ms
-                    )
-                    click_element = first_click_target.element_handle()
-                    if click_element is None:
+                    box = first_click_target.bounding_box()
+                    if box is None:
                         raise RuntimeError(
-                            "Impossible de conserver l'élément du premier clic."
+                            "Impossible de déterminer la position du bouton."
                         )
+                    click_x = box["x"] + (box["width"] / 2)
+                    click_y = box["y"] + (box["height"] / 2)
+                    initial_text = (
+                        visible_text_at_point(page, click_x, click_y)
+                        or target.button_text
+                    )
                     first_click_target.click(timeout=settings.click_timeout_ms)
 
-                    wait_for_element_text_change(
+                    wait_for_text_change_at_point(
                         page,
-                        click_element,
-                        target.button_text,
+                        click_x,
+                        click_y,
+                        initial_text,
                         settings.click_timeout_ms,
                     )
                     previous_url = page.url
                     navigation_status["value"] = None
-                    click_element.click(timeout=settings.click_timeout_ms)
+                    page.mouse.click(click_x, click_y)
                     wait_for_redirect(
                         page, previous_url, settings.redirect_timeout_ms
                     )
