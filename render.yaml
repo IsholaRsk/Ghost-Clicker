@@ -14,8 +14,6 @@ services:
         value: /tmp/ghost-clicker-proxy-gateway.txt
       - key: HEADLESS
         value: "true"
-      - key: IP_CHECK_URL
-        value: https://ipinfo.io/json
       - key: NAVIGATION_TIMEOUT_MS
         value: "30000"
       - key: CLICK_TIMEOUT_MS

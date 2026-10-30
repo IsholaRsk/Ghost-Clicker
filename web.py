@@ -443,10 +443,10 @@ def download_results() -> Response:
         [
             "source",
             "date",
+            "repetition",
+            "repetitions_planifiees",
             "proxy",
-            "tentatives_proxy",
-            "ip_sortie",
-            "pays",
+            "connexions_proxy",
             "url_initiale",
             "premier_libelle",
             "second_libelle",
@@ -464,10 +464,10 @@ def download_results() -> Response:
                 [
                     report.get("source", ""),
                     result.get("started_at", ""),
+                    result.get("repetition", ""),
+                    report.get("repetition_count", ""),
                     result.get("proxy_name", ""),
                     result.get("proxy_attempts", ""),
-                    result.get("exit_ip", ""),
-                    result.get("proxy_country", ""),
                     result.get("initial_url", ""),
                     result.get("button_text", ""),
                     result.get("second_button_text", ""),
@@ -498,6 +498,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                 <tr>
                   <td>{html.escape(str(result.get('started_at', '')))}</td>
                   <td>{html.escape(str(report.get('source', '')))}</td>
+                  <td>{html.escape(str(result.get('repetition', '')))} / {html.escape(str(report.get('repetition_count', '')))}</td>
                   <td>{html.escape(str(result.get('proxy_name', '')))}</td>
                   <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
                   <td>{html.escape(str(result.get('button_text', '')))}</td>
@@ -507,7 +508,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                   <td class="error">{html.escape(str(result.get('error', '')))}</td>
                 </tr>"""
             )
-    return "".join(rows) or '<tr><td colspan="9" class="empty">Aucun résultat.</td></tr>'
+    return "".join(rows) or '<tr><td colspan="10" class="empty">Aucun résultat.</td></tr>'
 
 
 @APP.get("/")
@@ -565,7 +566,7 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites au même emplacement du bouton, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : chaque lancement choisit aléatoirement entre 129 et 283 répétitions. Chaque visite ouvre directement la cible via une nouvelle connexion proxy, effectue deux clics au même emplacement, puis attend la redirection.</p>
 {message_html}
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
@@ -574,17 +575,17 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 </div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
 <form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-<label for="targets">Une ligne par visite : URL | premier libellé exact | second libellé de référence</label>
+<label for="targets">Une ligne par cible : URL | premier libellé exact | second libellé de référence</label>
 <textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le bot mémorise la position du premier libellé, clique deux fois exactement au même endroit avec une pause de 500 ms, puis attend la redirection.</p>
+<section class="card"><h2>Exécution</h2><p>À chaque lancement, le bot choisit un nombre aléatoire inclus entre 129 et 283 et répète toute la liste des cibles ce nombre de fois. Pour chaque visite, Chromium démarre avec une nouvelle connexion à la passerelle, ouvre immédiatement la cible sans vérifier l’IP du proxy, clique deux fois exactement au même endroit avec une pause de 500 ms, attend la redirection, puis se ferme complètement.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
 <p>Les listes, paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
-<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
+<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Répétition</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
 </main></body></html>"""
 
 
