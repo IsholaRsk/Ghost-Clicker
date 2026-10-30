@@ -361,7 +361,7 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.clicked_labels = []
                 self.text_requests = []
                 self.coordinate_clicks = []
-                self.evaluated_points = []
+                self.waits = []
                 self.screen_text = ""
                 self.mouse = FakeMouse(self)
                 self.main_frame = object()
@@ -386,15 +386,11 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.screen_text = text
                 return FakeButton(self, text, self.changed_labels[text])
 
-            def evaluate(self, _script, point):
-                self.evaluated_points.append((point["x"], point["y"]))
-                return self.screen_text
-
             def wait_for_load_state(self, *_args, **_kwargs):
                 return None
 
-            def wait_for_timeout(self, _milliseconds):
-                return None
+            def wait_for_timeout(self, milliseconds):
+                self.waits.append(milliseconds)
 
         class FakeContext:
             def __init__(self):
@@ -469,29 +465,7 @@ class BrowserLifecycleTests(unittest.TestCase):
                 [(target.button_text, True)],
             )
             self.assertEqual(page.coordinate_clicks, [(110, 220)])
-            self.assertEqual(page.evaluated_points, [(110, 220), (110, 220)])
-
-
-class LabelChangeTests(unittest.TestCase):
-    def test_waits_for_visible_content_at_the_same_point_to_change(self):
-        class FakePage:
-            def __init__(self):
-                self.values = iter(["Continuer", "Continue in source language"])
-
-            def evaluate(self, _script, _point):
-                return next(self.values)
-
-            def wait_for_timeout(self, _milliseconds):
-                return None
-
-        page = FakePage()
-        previous = main.visible_text_at_point(page, 10, 20)
-        self.assertEqual(
-            main.wait_for_text_change_at_point(
-                page, 10, 20, previous, 1_000
-            ),
-            "Continue in source language",
-        )
+            self.assertEqual(page.waits, [500])
 
 
 class TargetResponseTests(unittest.TestCase):

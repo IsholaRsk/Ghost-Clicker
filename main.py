@@ -370,44 +370,6 @@ def install_request_guard(page: Any) -> None:
     page.route("**/*", handle)
 
 
-def normalize_visible_text(value: str) -> str:
-    return " ".join(value.split())
-
-
-def visible_text_at_point(page: Any, x: float, y: float) -> str:
-    value = page.evaluate(
-        """({x, y}) => {
-            const element = document.elementFromPoint(x, y);
-            if (!element) return '';
-            const clickable = element.closest(
-                'button, a, [role="button"], [role="link"]'
-            );
-            const source = clickable || element;
-            return source.innerText || source.textContent || '';
-        }""",
-        {"x": x, "y": y},
-    )
-    return normalize_visible_text(str(value or ""))
-
-
-def wait_for_text_change_at_point(
-    page: Any, x: float, y: float, previous_text: str, timeout_ms: int
-) -> str:
-    """Attend que le contenu visible au même emplacement change."""
-
-    previous = normalize_visible_text(previous_text)
-    deadline = time.monotonic() + (timeout_ms / 1_000)
-    while True:
-        current = visible_text_at_point(page, x, y)
-        if current and current != previous:
-            return current
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                "Le contenu du bouton n'a pas changé après le premier clic."
-            )
-        page.wait_for_timeout(250)
-
-
 def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
     deadline = time.monotonic() + (timeout_ms / 1_000)
     while page.url == previous_url:
@@ -556,19 +518,9 @@ def run_targets(
                         )
                     click_x = box["x"] + (box["width"] / 2)
                     click_y = box["y"] + (box["height"] / 2)
-                    initial_text = (
-                        visible_text_at_point(page, click_x, click_y)
-                        or target.button_text
-                    )
                     first_click_target.click(timeout=settings.click_timeout_ms)
+                    page.wait_for_timeout(500)
 
-                    wait_for_text_change_at_point(
-                        page,
-                        click_x,
-                        click_y,
-                        initial_text,
-                        settings.click_timeout_ms,
-                    )
                     previous_url = page.url
                     navigation_status["value"] = None
                     page.mouse.click(click_x, click_y)
