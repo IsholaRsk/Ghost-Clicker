@@ -570,16 +570,16 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
 <form method="post" action="{url_for('save_gateway')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Passerelle Rayobyte — username:password@host:port</label><input type="password" name="gateway" autocomplete="off" required><button type="submit"{edit_disabled}>Enregistrer la passerelle</button></form>
-<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé | second libellé</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
+<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé exact | second libellé de référence</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
 </div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
 <form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-<label for="targets">Une ligne par visite : URL | premier libellé exact | second libellé exact</label>
+<label for="targets">Une ligne par visite : URL | premier libellé exact | second libellé de référence</label>
 <textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le premier libellé est cliqué, le bot attend le second libellé, clique une seconde fois, puis attend la redirection.</p>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le bot clique l’élément portant le premier libellé, attend que le texte de ce même élément change, clique encore une fois dessus, puis attend la redirection.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>

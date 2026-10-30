@@ -370,6 +370,43 @@ def install_request_guard(page: Any) -> None:
     page.route("**/*", handle)
 
 
+def closest_clickable_target(text_target: Any) -> Any:
+    """Préfère le bouton ou lien parent du nœud qui porte le texte."""
+
+    clickable = text_target.locator(
+        "xpath=ancestor-or-self::*[self::button or self::a "
+        "or @role='button' or @role='link'][1]"
+    )
+    return clickable.first if clickable.count() else text_target
+
+
+def normalize_visible_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def wait_for_element_text_change(
+    page: Any, element: Any, previous_text: str, timeout_ms: int
+) -> str:
+    """Attend que le même élément affiche un texte non vide différent."""
+
+    previous = normalize_visible_text(previous_text)
+    deadline = time.monotonic() + (timeout_ms / 1_000)
+    while True:
+        try:
+            current = normalize_visible_text(element.inner_text())
+        except Exception as exc:
+            raise RuntimeError(
+                "L'élément du premier clic a été remplacé avant le second clic."
+            ) from exc
+        if current and current != previous:
+            return current
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "Le libellé de l'élément cliquable n'a pas changé après le premier clic."
+            )
+        page.wait_for_timeout(250)
+
+
 def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
     deadline = time.monotonic() + (timeout_ms / 1_000)
     while page.url == previous_url:
@@ -511,17 +548,26 @@ def run_targets(
                     first_click_target.wait_for(
                         state="visible", timeout=settings.click_timeout_ms
                     )
+                    first_click_target = closest_clickable_target(first_click_target)
+                    first_click_target.wait_for(
+                        state="visible", timeout=settings.click_timeout_ms
+                    )
+                    click_element = first_click_target.element_handle()
+                    if click_element is None:
+                        raise RuntimeError(
+                            "Impossible de conserver l'élément du premier clic."
+                        )
                     first_click_target.click(timeout=settings.click_timeout_ms)
 
-                    second_click_target = page.get_by_text(
-                        target.second_button_text, exact=True
-                    ).first
-                    second_click_target.wait_for(
-                        state="visible", timeout=settings.click_timeout_ms
+                    wait_for_element_text_change(
+                        page,
+                        click_element,
+                        target.button_text,
+                        settings.click_timeout_ms,
                     )
                     previous_url = page.url
                     navigation_status["value"] = None
-                    second_click_target.click(timeout=settings.click_timeout_ms)
+                    click_element.click(timeout=settings.click_timeout_ms)
                     wait_for_redirect(
                         page, previous_url, settings.redirect_timeout_ms
                     )

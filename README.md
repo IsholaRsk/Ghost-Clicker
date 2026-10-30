@@ -6,9 +6,9 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une pas
 2. contrôle son IP de sortie ;
 3. recrée une seule fois une connexion neuve à la même passerelle si ce contrôle échoue ;
 4. ouvre la page dans Chromium headless ;
-5. recherche le bouton par son premier libellé visible exact et clique une fois ;
-6. attend que ce bouton affiche le second libellé exact ;
-7. clique une seconde fois ;
+5. recherche l’élément cliquable par son premier libellé visible exact et clique une fois ;
+6. attend que le texte visible de ce même élément change ;
+7. clique une seconde fois sur le même élément ;
 8. attend que l’URL change ;
 9. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
 10. ferme complètement Chromium avant de passer à l’URL suivante.
@@ -64,7 +64,7 @@ Le fichier des cibles utilise :
 https://site-autorise.example/page | Continuer | Confirmer
 ```
 
-Une ligne par URL, suivie du premier puis du second libellé exact du bouton. Après le premier clic, le bot attend que le second libellé apparaisse avant de cliquer à nouveau.
+Une ligne par URL, suivie du premier libellé exact puis du second libellé de référence. Après le premier clic, le bot attend que le texte du même élément change avant de cliquer à nouveau. Le second libellé est conservé dans les résultats, mais n’est pas utilisé comme sélecteur afin d’éviter les échecs dus à la traduction du navigateur.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -88,7 +88,7 @@ Après connexion :
 3. vérifiez que la passerelle est indiquée comme configurée ;
 4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Les deux libellés après les séparateurs `|` doivent correspondre exactement aux textes visibles successifs de l’élément cliquable. Celui-ci peut être un bouton ou un lien. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
+Le premier libellé après `|` doit correspondre exactement au texte visible initial de l’élément cliquable. Le second sert de référence dans les résultats ; le bot détecte directement le changement de texte sur le même élément, même si Safari affiche une traduction différente de Chromium. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
 
 ## Lancer le bot
 
@@ -162,7 +162,7 @@ python .\main.py
 - passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
-- au maximum deux clics explicites par URL, un pour chaque libellé configuré ;
+- au maximum deux clics explicites sur le même élément par URL ;
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle connexion à la passerelle rotative pour chaque URL ;
 - une seule reprise avec une connexion neuve lorsque le contrôle IP échoue ;
