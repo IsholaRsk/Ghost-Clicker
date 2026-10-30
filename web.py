@@ -565,7 +565,7 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites sur l’élément aux textes visibles configurés, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites au même emplacement du bouton, puis attente de redirection.</p>
 {message_html}
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
@@ -579,7 +579,7 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le bot clique l’élément portant le premier libellé, attend que le texte de ce même élément change, clique encore une fois dessus, puis attend la redirection.</p>
+<section class="card"><h2>Exécution</h2><p>Chromium fonctionne en mode headless dans Docker. Pour chaque URL, une nouvelle connexion à la passerelle rotative est contrôlée. En cas d’échec, une seconde connexion neuve à la même passerelle est essayée une seule fois. Le bot mémorise la position du premier libellé, clique, attend que le contenu visible à cet emplacement change, clique une seconde fois exactement au même endroit, puis attend la redirection.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
