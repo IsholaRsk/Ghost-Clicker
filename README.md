@@ -6,12 +6,12 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. À chaque lancemen
 2. ouvre immédiatement la page cible dans Chromium headless ;
 3. repère le premier libellé visible exact et mémorise sa position dans le bouton ;
 4. clique une première fois ;
-5. après une courte pause de 500 ms, clique une seconde fois exactement au même emplacement ;
-6. attend que l’URL change ;
+5. si aucun second libellé n’est configuré, attend immédiatement la redirection ;
+6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis attend la redirection ;
 7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
 8. ferme complètement Chromium avant la visite suivante.
 
-Il effectue exactement ces deux clics, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
+Il effectue exactement un ou deux clics selon la ligne cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/IsholaRsk/Ghost-Clicker)
 
@@ -56,13 +56,17 @@ username:password@host:port
 
 La passerelle doit attribuer une nouvelle IP à chaque connexion. La valeur est saisie dans l’interface authentifiée, stockée uniquement dans `/tmp` et jamais ajoutée à Git. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
-Le fichier des cibles utilise :
+Le fichier des cibles accepte deux formats :
 
 ```text
+# Un seul clic : le premier bouton redirige directement
+https://site-autorise.example/page | Continuer
+
+# Deux clics au même emplacement
 https://site-autorise.example/page | Continuer | Confirmer
 ```
 
-Une ligne par URL, suivie du premier libellé exact puis du second libellé de référence. Le bot clique deux fois au même emplacement, avec une pause de 500 ms entre les clics. Il n’attend plus le second libellé et ne dépend plus du remplacement du bouton dans le DOM. Le second libellé est conservé uniquement dans les résultats.
+Avec deux champs, le bot clique une fois puis attend immédiatement la redirection. Avec trois champs, il clique deux fois au même emplacement, avec une pause de 500 ms entre les clics. Le second libellé sert à sélectionner le mode à deux clics et reste une valeur de référence : il n’est pas recherché dans la page.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -86,7 +90,7 @@ Après connexion :
 3. vérifiez que la passerelle est indiquée comme configurée ;
 4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Le premier libellé après `|` doit correspondre exactement au texte visible initial du bouton. Le second sert uniquement de référence dans les résultats. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher le deuxième clic. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
+Le premier libellé après `|` doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque ce premier clic redirige directement. Ajoutez un second libellé pour demander un deuxième clic au même emplacement ; sa valeur reste uniquement une référence dans les résultats. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher le deuxième clic. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
 
 ## Lancer le bot
 
@@ -107,7 +111,7 @@ L’interface affiche :
 - numéro de répétition et nombre aléatoire total choisi ;
 - nom de la passerelle et ouverture de connexion ;
 - URL initiale ;
-- premier et second libellés du bouton ;
+- premier libellé et éventuel second libellé du bouton ;
 - URL après redirection ;
 - réussite ou échec ;
 - message d’erreur.
@@ -144,6 +148,7 @@ Pour utiliser `main.py` avec une seule URL, créez `proxy-gateway.txt` avec l’
 PROXY_GATEWAY_FILE="proxy-gateway.txt"
 TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
+# Laissez vide pour un clic unique avec redirection directe.
 SECOND_BUTTON_TEXT="Confirmer"
 HEADLESS=false
 ```
@@ -162,7 +167,7 @@ python .\main.py
 - passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
-- exactement deux clics explicites au même emplacement du bouton par visite ;
+- exactement un clic par visite sans second libellé, ou deux clics au même emplacement lorsqu’il est configuré ;
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
 - aucune requête de contrôle IP avant l’ouverture de la cible ;

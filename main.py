@@ -1,4 +1,4 @@
-"""Moteur Playwright : répétitions aléatoires et deux clics par URL publique."""
+"""Moteur Playwright : répétitions aléatoires et un ou deux clics par cible."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class BrowserSettings:
 class Target:
     url: str
     button_text: str
-    second_button_text: str
+    second_button_text: str = ""
 
 
 @dataclass
@@ -282,6 +282,11 @@ def validate_button_text(value: str) -> str:
     return text
 
 
+def validate_optional_button_text(value: str) -> str:
+    text = value.strip()
+    return validate_button_text(text) if text else ""
+
+
 def proxy_gateway_path(base_dir: Path) -> Path:
     path = Path(os.getenv("PROXY_GATEWAY_FILE", DEFAULT_PROXY_GATEWAY_FILE))
     return path if path.is_absolute() else base_dir / path
@@ -453,12 +458,14 @@ def visit_target(
             raise RuntimeError("Impossible de déterminer la position du bouton.")
         click_x = box["x"] + (box["width"] / 2)
         click_y = box["y"] + (box["height"] / 2)
-        first_click_target.click(timeout=settings.click_timeout_ms)
-        page.wait_for_timeout(500)
-
         previous_url = page.url
         navigation_status["value"] = None
-        page.mouse.click(click_x, click_y)
+        first_click_target.click(timeout=settings.click_timeout_ms)
+
+        if target.second_button_text:
+            page.wait_for_timeout(500)
+            page.mouse.click(click_x, click_y)
+
         wait_for_redirect(page, previous_url, settings.redirect_timeout_ms)
 
         if settings.wait_after_redirect_seconds:
@@ -546,8 +553,8 @@ def main() -> int:
         target = Target(
             url=validate_public_url(required_env("TARGET_URL")),
             button_text=validate_button_text(required_env("BUTTON_TEXT")),
-            second_button_text=validate_button_text(
-                required_env("SECOND_BUTTON_TEXT")
+            second_button_text=validate_optional_button_text(
+                os.getenv("SECOND_BUTTON_TEXT", "")
             ),
         )
         report = run_targets(settings, [target])

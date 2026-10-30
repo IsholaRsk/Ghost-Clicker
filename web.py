@@ -27,6 +27,7 @@ from main import (
     parse_proxy_gateway_text,
     run_targets,
     validate_button_text,
+    validate_optional_button_text,
     validate_public_url,
 )
 
@@ -167,7 +168,7 @@ def targets_from_settings(value: dict[str, Any]) -> list[Target]:
             Target(
                 url=validate_public_url(str(item.get("url", ""))),
                 button_text=validate_button_text(str(item.get("button_text", ""))),
-                second_button_text=validate_button_text(
+                second_button_text=validate_optional_button_text(
                     str(item.get("second_button_text", ""))
                 ),
             )
@@ -182,17 +183,20 @@ def parse_targets_text(value: str) -> list[Target]:
         if not line or line.startswith("#"):
             continue
         parts = line.split("|", maxsplit=2)
-        if len(parts) != 3:
+        if len(parts) not in {2, 3}:
             raise ConfigurationError(
                 f"Ligne {line_number} : utilisez le format "
-                "URL | premier libellé | second libellé."
+                "URL | premier libellé [| second libellé]."
             )
-        url, button_text, second_button_text = parts
+        url, button_text = parts[:2]
+        second_button_text = parts[2] if len(parts) == 3 else ""
         targets.append(
             Target(
                 url=validate_public_url(url),
                 button_text=validate_button_text(button_text),
-                second_button_text=validate_button_text(second_button_text),
+                second_button_text=validate_optional_button_text(
+                    second_button_text
+                ),
             )
         )
     if len(targets) > 50:
@@ -204,10 +208,11 @@ def targets_to_text(value: dict[str, Any]) -> str:
     lines: list[str] = []
     for item in value.get("targets", []):
         if isinstance(item, dict):
-            lines.append(
-                f"{item.get('url', '')} | {item.get('button_text', '')} | "
-                f"{item.get('second_button_text', '')}"
-            )
+            line = f"{item.get('url', '')} | {item.get('button_text', '')}"
+            second_button_text = str(item.get("second_button_text", "")).strip()
+            if second_button_text:
+                line += f" | {second_button_text}"
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -566,26 +571,26 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : chaque lancement choisit aléatoirement entre 129 et 283 répétitions. Chaque visite ouvre directement la cible via une nouvelle connexion proxy, effectue deux clics au même emplacement, puis attend la redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : chaque lancement choisit aléatoirement entre 129 et 283 répétitions. Chaque visite ouvre directement la cible via une nouvelle connexion proxy, effectue un clic si un seul libellé est configuré ou deux clics si le second est présent, puis attend la redirection.</p>
 {message_html}
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
 <form method="post" action="{url_for('save_gateway')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Passerelle Rayobyte — username:password@host:port</label><input type="password" name="gateway" autocomplete="off" required><button type="submit"{edit_disabled}>Enregistrer la passerelle</button></form>
-<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé exact | second libellé de référence</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
+<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé exact [| second libellé]</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
 </div></section>
 <div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
 <form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-<label for="targets">Une ligne par cible : URL | premier libellé exact | second libellé de référence</label>
-<textarea id="targets" name="targets" placeholder="https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
+<label for="targets">Une ligne par cible : URL | premier libellé exact [| second libellé optionnel]</label>
+<textarea id="targets" name="targets" placeholder="Un clic : https://site-autorise.example/page | Continuer&#10;Deux clics : https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
 <label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
 <label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
 <button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>À chaque lancement, le bot choisit un nombre aléatoire inclus entre 129 et 283 et répète toute la liste des cibles ce nombre de fois. Pour chaque visite, Chromium démarre avec une nouvelle connexion à la passerelle, ouvre immédiatement la cible sans vérifier l’IP du proxy, clique deux fois exactement au même endroit avec une pause de 500 ms, attend la redirection, puis se ferme complètement.</p>
+<section class="card"><h2>Exécution</h2><p>À chaque lancement, le bot choisit un nombre aléatoire inclus entre 129 et 283 et répète toute la liste des cibles ce nombre de fois. Pour chaque visite, Chromium démarre avec une nouvelle connexion à la passerelle et ouvre immédiatement la cible sans vérifier l’IP du proxy. Avec un seul libellé, le premier clic doit rediriger directement. Avec deux libellés, le bot clique une seconde fois au même endroit après 500 ms. Il attend ensuite la redirection et ferme complètement Chromium.</p>
 <form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
 <a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
 <form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
 <p>Les listes, paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
-<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Répétition</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
+<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Répétition</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé (optionnel)</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
 </main></body></html>"""
 
 
