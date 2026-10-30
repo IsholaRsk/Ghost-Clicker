@@ -1,10 +1,11 @@
-"""Moteur Playwright : un proxy vérifié et deux clics par URL publique."""
+"""Moteur Playwright : répétitions aléatoires et deux clics par URL publique."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
 import os
+import random
 import re
 import time
 import unicodedata
@@ -16,6 +17,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 DEFAULT_PROXY_GATEWAY_FILE = "/tmp/ghost-clicker-proxy-gateway.txt"
+MIN_RUN_REPETITIONS = 129
+MAX_RUN_REPETITIONS = 283
 
 
 class ConfigurationError(ValueError):
@@ -40,7 +43,6 @@ class ProxyConfig:
 @dataclass(frozen=True)
 class BrowserSettings:
     gateway: ProxyConfig
-    ip_check_url: str
     headless: bool
     navigation_timeout_ms: int
     click_timeout_ms: int
@@ -62,10 +64,9 @@ class VisitResult:
     initial_url: str
     button_text: str
     second_button_text: str
+    repetition: int = 0
     proxy_name: str = ""
     proxy_attempts: int = 0
-    exit_ip: str = ""
-    proxy_country: str = ""
     final_url: str = ""
     initial_status: int | None = None
     final_status: int | None = None
@@ -77,6 +78,7 @@ class VisitResult:
 @dataclass
 class RunReport:
     started_at: str
+    repetition_count: int = 0
     finished_at: str = ""
     success: bool = False
     error: str = ""
@@ -296,9 +298,6 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
 
     return BrowserSettings(
         gateway=load_proxy_gateway(proxy_gateway_path(base_dir)),
-        ip_check_url=validate_public_url(
-            os.getenv("IP_CHECK_URL", "https://ipinfo.io/json")
-        ),
         headless=parse_bool(os.getenv("HEADLESS"), True, "HEADLESS"),
         navigation_timeout_ms=parse_positive_int(
             os.getenv("NAVIGATION_TIMEOUT_MS"), 30_000, "NAVIGATION_TIMEOUT_MS", 1_000
@@ -337,19 +336,6 @@ def redact_error(error: BaseException | str, settings: BrowserSettings) -> str:
         message,
     )
     return message[:1_000]
-
-
-def extract_ip_information(payload: Any) -> tuple[str, str]:
-    if not isinstance(payload, dict):
-        return "", ""
-    ip = str(payload.get("ip") or payload.get("query") or "").strip()
-    country = str(
-        payload.get("country")
-        or payload.get("country_code")
-        or payload.get("countryCode")
-        or ""
-    ).strip()
-    return ip, country
 
 
 def install_request_guard(page: Any) -> None:
@@ -393,55 +379,116 @@ def require_successful_target_response(response: Any) -> None:
         )
 
 
-def check_proxy(page: Any, settings: BrowserSettings) -> tuple[str, str]:
-    response = page.goto(
-        settings.ip_check_url,
-        wait_until="domcontentloaded",
-        timeout=settings.navigation_timeout_ms,
-    )
-    if response is None or not 200 <= response.status < 300:
-        status = response.status if response else "aucun"
-        raise RuntimeError(f"Contrôle proxy refusé : statut HTTP {status}.")
-    try:
-        payload = response.json()
-    except Exception:
-        payload = json.loads(response.text())
-    exit_ip, country = extract_ip_information(payload)
-    if not exit_ip:
-        raise RuntimeError("Le contrôle proxy n'a renvoyé aucune adresse IP.")
-    return exit_ip, country
-
-
-def open_verified_proxy_context(
+def open_proxy_context(
     browser: Any,
     settings: BrowserSettings,
     result: VisitResult,
 ) -> tuple[Any, Any]:
-    """Vérifie la passerelle et recrée une connexion une seule fois en cas d'échec."""
+    """Ouvre directement une page via la passerelle, sans requête de contrôle."""
 
-    errors: list[str] = []
     gateway = settings.gateway
     result.proxy_name = gateway.name
-    for attempt in range(1, 3):
-        context = None
-        result.proxy_attempts += 1
-        try:
-            context = browser.new_context(proxy=gateway.playwright_proxy())
-            context.set_default_navigation_timeout(settings.navigation_timeout_ms)
-            page = context.new_page()
-            result.exit_ip, result.proxy_country = check_proxy(page, settings)
-            return context, page
-        except Exception as exc:
-            errors.append(
-                f"tentative {attempt}: {redact_error(exc, settings)}"
-            )
-            if context is not None:
-                try:
-                    context.close()
-                except Exception:
-                    pass
+    result.proxy_attempts = 1
+    context = browser.new_context(proxy=gateway.playwright_proxy())
+    context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+    return context, context.new_page()
 
-    raise RuntimeError("; ".join(errors))
+
+def visit_target(
+    playwright: Any,
+    settings: BrowserSettings,
+    target: Target,
+    repetition: int,
+) -> VisitResult:
+    """Effectue une visite et ferme entièrement son navigateur."""
+
+    started = time.monotonic()
+    result = VisitResult(
+        started_at=now_iso(),
+        initial_url=target.url,
+        button_text=target.button_text,
+        second_button_text=target.second_button_text,
+        repetition=repetition,
+    )
+    browser = None
+    context = None
+    page = None
+    navigation_status: dict[str, int | None] = {"value": None}
+    record_navigation_handler: Any | None = None
+
+    try:
+        browser = playwright.chromium.launch(headless=settings.headless)
+        context, page = open_proxy_context(browser, settings, result)
+        install_request_guard(page)
+
+        def record_navigation(
+            response: Any,
+            current_page: Any = page,
+            status_holder: dict[str, int | None] = navigation_status,
+        ) -> None:
+            try:
+                if (
+                    response.request.is_navigation_request()
+                    and response.frame == current_page.main_frame
+                ):
+                    status_holder["value"] = response.status
+            except Exception:
+                return
+
+        record_navigation_handler = record_navigation
+        page.on("response", record_navigation_handler)
+        response = page.goto(
+            target.url,
+            wait_until="domcontentloaded",
+            timeout=settings.navigation_timeout_ms,
+        )
+        result.initial_status = response.status if response else None
+        require_successful_target_response(response)
+        first_click_target = page.get_by_text(target.button_text, exact=True).first
+        first_click_target.wait_for(
+            state="visible", timeout=settings.click_timeout_ms
+        )
+        box = first_click_target.bounding_box()
+        if box is None:
+            raise RuntimeError("Impossible de déterminer la position du bouton.")
+        click_x = box["x"] + (box["width"] / 2)
+        click_y = box["y"] + (box["height"] / 2)
+        first_click_target.click(timeout=settings.click_timeout_ms)
+        page.wait_for_timeout(500)
+
+        previous_url = page.url
+        navigation_status["value"] = None
+        page.mouse.click(click_x, click_y)
+        wait_for_redirect(page, previous_url, settings.redirect_timeout_ms)
+
+        if settings.wait_after_redirect_seconds:
+            page.wait_for_timeout(
+                int(settings.wait_after_redirect_seconds * 1_000)
+            )
+        result.final_url = page.url
+        result.final_status = navigation_status["value"]
+        result.success = True
+    except Exception as exc:
+        result.final_url = page.url if page is not None else ""
+        result.error = redact_error(exc, settings)
+    finally:
+        if page is not None and record_navigation_handler is not None:
+            try:
+                page.remove_listener("response", record_navigation_handler)
+            except Exception:
+                pass
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        result.duration_ms = round((time.monotonic() - started) * 1_000)
+    return result
 
 
 def run_targets(
@@ -458,110 +505,26 @@ def run_targets(
             "Playwright n'est pas installé. Exécutez pip install -r requirements.txt."
         ) from exc
 
-    report = RunReport(started_at=now_iso())
+    repetition_count = random.randint(MIN_RUN_REPETITIONS, MAX_RUN_REPETITIONS)
+    report = RunReport(
+        started_at=now_iso(), repetition_count=repetition_count
+    )
+    total_visits = repetition_count * len(targets)
+    completed_visits = 0
+
     with sync_playwright() as playwright:
         try:
-            for index, target in enumerate(targets):
-                started = time.monotonic()
-                result = VisitResult(
-                    started_at=now_iso(),
-                    initial_url=target.url,
-                    button_text=target.button_text,
-                    second_button_text=target.second_button_text,
-                )
-                browser = None
-                context = None
-                page = None
-                navigation_status: dict[str, int | None] = {"value": None}
-                record_navigation_handler: Any | None = None
-
-                try:
-                    browser = playwright.chromium.launch(headless=settings.headless)
-                    context, page = open_verified_proxy_context(
-                        browser, settings, result
+            for repetition in range(1, repetition_count + 1):
+                for target in targets:
+                    report.results.append(
+                        visit_target(playwright, settings, target, repetition)
                     )
-                    install_request_guard(page)
-
-                    def record_navigation(
-                        response: Any,
-                        current_page: Any = page,
-                        status_holder: dict[str, int | None] = navigation_status,
-                    ) -> None:
-                        try:
-                            if (
-                                response.request.is_navigation_request()
-                                and response.frame == current_page.main_frame
-                            ):
-                                status_holder["value"] = response.status
-                        except Exception:
-                            return
-
-                    record_navigation_handler = record_navigation
-                    page.on("response", record_navigation_handler)
-                    response = page.goto(
-                        target.url,
-                        wait_until="domcontentloaded",
-                        timeout=settings.navigation_timeout_ms,
-                    )
-                    result.initial_status = response.status if response else None
-                    require_successful_target_response(response)
-                    first_click_target = page.get_by_text(
-                        target.button_text, exact=True
-                    ).first
-                    first_click_target.wait_for(
-                        state="visible", timeout=settings.click_timeout_ms
-                    )
-                    box = first_click_target.bounding_box()
-                    if box is None:
-                        raise RuntimeError(
-                            "Impossible de déterminer la position du bouton."
-                        )
-                    click_x = box["x"] + (box["width"] / 2)
-                    click_y = box["y"] + (box["height"] / 2)
-                    first_click_target.click(timeout=settings.click_timeout_ms)
-                    page.wait_for_timeout(500)
-
-                    previous_url = page.url
-                    navigation_status["value"] = None
-                    page.mouse.click(click_x, click_y)
-                    wait_for_redirect(
-                        page, previous_url, settings.redirect_timeout_ms
-                    )
-
-                    if settings.wait_after_redirect_seconds:
-                        page.wait_for_timeout(
-                            int(settings.wait_after_redirect_seconds * 1_000)
-                        )
-                    result.final_url = page.url
-                    result.final_status = navigation_status["value"]
-                    result.success = True
-                except Exception as exc:
-                    result.final_url = page.url if page is not None else ""
-                    result.error = redact_error(exc, settings)
-                finally:
-                    if page is not None and record_navigation_handler is not None:
-                        try:
-                            page.remove_listener("response", record_navigation_handler)
-                        except Exception:
-                            pass
-                    if context is not None:
-                        try:
-                            context.close()
-                        except Exception:
-                            pass
-                    if browser is not None:
-                        try:
-                            browser.close()
-                        except Exception:
-                            pass
-                    result.duration_ms = round((time.monotonic() - started) * 1_000)
-                    report.results.append(result)
-
-                if (
-                    settings.delay_between_targets_seconds
-                    and index < len(targets) - 1
-                ):
-                    time.sleep(settings.delay_between_targets_seconds)
+                    completed_visits += 1
+                    if (
+                        settings.delay_between_targets_seconds
+                        and completed_visits < total_visits
+                    ):
+                        time.sleep(settings.delay_between_targets_seconds)
 
             report.success = bool(report.results) and all(
                 result.success for result in report.results

@@ -1,17 +1,15 @@
 # Ghost-Clicker — Web Service Docker
 
-Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il utilise une passerelle proxy rotative secrète et, pour chaque URL enregistrée :
+Ghost-Clicker est un outil de **test fonctionnel autorisé**. À chaque lancement, il choisit aléatoirement un nombre entier inclus entre **129 et 283**, puis répète toute la liste des cibles ce nombre de fois. Pour chaque visite, il :
 
-1. crée une nouvelle connexion à la passerelle rotative ;
-2. contrôle son IP de sortie ;
-3. recrée une seule fois une connexion neuve à la même passerelle si ce contrôle échoue ;
-4. ouvre la page dans Chromium headless ;
-5. repère le premier libellé visible exact et mémorise sa position dans le bouton ;
-6. clique une première fois ;
-7. après une courte pause de 500 ms, clique une seconde fois exactement au même emplacement ;
-8. attend que l’URL change ;
-9. enregistre le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
-10. ferme complètement Chromium avant de passer à l’URL suivante.
+1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
+2. ouvre immédiatement la page cible dans Chromium headless ;
+3. repère le premier libellé visible exact et mémorise sa position dans le bouton ;
+4. clique une première fois ;
+5. après une courte pause de 500 ms, clique une seconde fois exactement au même emplacement ;
+6. attend que l’URL change ;
+7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
+8. ferme complètement Chromium avant la visite suivante.
 
 Il effectue exactement ces deux clics, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
@@ -97,6 +95,8 @@ Deux modes sont disponibles :
 - **Lancer maintenant** : exécution manuelle ;
 - **Planification** : intervalle configurable entre 60 et 10080 minutes.
 
+Chaque lancement manuel ou planifié tire un nouveau nombre aléatoire entre 129 et 283. Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites.
+
 Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
 
 ## Résultats
@@ -104,8 +104,8 @@ Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les
 L’interface affiche :
 
 - date et source de l’exécution ;
-- nom de la passerelle et nombre de tentatives de connexion ;
-- IP et pays de sortie ;
+- numéro de répétition et nombre aléatoire total choisi ;
+- nom de la passerelle et ouverture de connexion ;
 - URL initiale ;
 - premier et second libellés du bouton ;
 - URL après redirection ;
@@ -162,10 +162,11 @@ python .\main.py
 - passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
-- au maximum deux clics explicites au même emplacement du bouton par URL ;
+- exactement deux clics explicites au même emplacement du bouton par visite ;
 - fréquence planifiée minimale de 60 minutes ;
-- nouvelle connexion à la passerelle rotative pour chaque URL ;
-- une seule reprise avec une connexion neuve lorsque le contrôle IP échoue ;
+- nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
+- aucune requête de contrôle IP avant l’ouverture de la cible ;
+- entre 129 et 283 répétitions aléatoires de la liste par lancement ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 
 ## Tests

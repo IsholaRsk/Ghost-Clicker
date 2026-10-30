@@ -186,6 +186,35 @@ class WebUploadTests(unittest.TestCase):
             ],
         )
 
+    def test_csv_includes_the_random_repetition_without_ip_check_columns(self):
+        web.append_report(
+            {
+                "source": "manuel",
+                "repetition_count": 200,
+                "results": [
+                    {
+                        "started_at": "2026-10-30T00:00:00+00:00",
+                        "repetition": 7,
+                        "proxy_name": "passerelle-rotative",
+                        "proxy_attempts": 1,
+                        "initial_url": "https://first.example/page",
+                        "button_text": "Continuer",
+                        "second_button_text": "Confirmer",
+                        "success": True,
+                    }
+                ],
+            }
+        )
+
+        response = self.client.get("/results.csv", headers=self.headers)
+        content = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("repetition,repetitions_planifiees", content)
+        self.assertIn(",7,200,passerelle-rotative,1,", content)
+        self.assertNotIn("ip_sortie", content)
+        self.assertNotIn("pays", content)
+
     def test_upload_routes_require_authentication_and_csrf(self):
         unauthorized = self.client.post("/gateway")
         self.assertEqual(unauthorized.status_code, 401)

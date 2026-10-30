@@ -16,7 +16,6 @@ def make_settings(gateway=None):
             "SENSITIVE_USER_MARKER",
             "SENSITIVE_PASSWORD_MARKER",
         ),
-        ip_check_url="https://ipinfo.io/json",
         headless=True,
         navigation_timeout_ms=30_000,
         click_timeout_ms=15_000,
@@ -171,12 +170,6 @@ class SecurityTests(unittest.TestCase):
             },
         )
 
-    def test_extracts_ip_information(self):
-        self.assertEqual(
-            main.extract_ip_information({"ip": "203.0.113.10", "country": "US"}),
-            ("203.0.113.10", "US"),
-        )
-
     def test_request_guard_allows_public_hosts_and_blocks_private_hosts(self):
         class FakeRoute:
             def __init__(self):
@@ -208,38 +201,25 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(private_route.action, "blockedbyclient")
 
 
-class ProxyGatewayRetryTests(unittest.TestCase):
-    def test_retries_same_gateway_once_with_a_new_context(self):
-        class FakeResponse:
-            def __init__(self, status):
-                self.status = status
-
-            def json(self):
-                return {"ip": "203.0.113.20", "country": "US"}
-
-            def text(self):
-                return "{}"
-
+class ProxyGatewayConnectionTests(unittest.TestCase):
+    def test_opens_one_context_without_navigating_to_an_ip_check(self):
         class FakePage:
-            def __init__(self, status):
-                self.status = status
+            def __init__(self):
+                self.goto_calls = []
 
-            def goto(self, *_args, **_kwargs):
-                return FakeResponse(self.status)
+            def goto(self, *args, **kwargs):
+                self.goto_calls.append((args, kwargs))
 
         class FakeContext:
-            def __init__(self, status):
-                self.page = FakePage(status)
-                self.closed = False
+            def __init__(self):
+                self.page = FakePage()
+                self.timeout = None
 
-            def set_default_navigation_timeout(self, _timeout):
-                return None
+            def set_default_navigation_timeout(self, timeout):
+                self.timeout = timeout
 
             def new_page(self):
                 return self.page
-
-            def close(self):
-                self.closed = True
 
         class FakeBrowser:
             def __init__(self):
@@ -248,8 +228,7 @@ class ProxyGatewayRetryTests(unittest.TestCase):
 
             def new_context(self, **kwargs):
                 self.proxy_configurations.append(kwargs["proxy"])
-                status = 500 if not self.contexts else 200
-                context = FakeContext(status)
+                context = FakeContext()
                 self.contexts.append(context)
                 return context
 
@@ -260,70 +239,23 @@ class ProxyGatewayRetryTests(unittest.TestCase):
             second_button_text="Confirmer",
         )
         browser = FakeBrowser()
-        context, _page = main.open_verified_proxy_context(
-            browser, make_settings(), result
-        )
-        self.assertEqual(result.proxy_attempts, 2)
-        self.assertEqual(result.exit_ip, "203.0.113.20")
-        self.assertTrue(browser.contexts[0].closed)
-        self.assertIs(context, browser.contexts[1])
+        context, page = main.open_proxy_context(browser, make_settings(), result)
+
+        self.assertIs(context, browser.contexts[0])
+        self.assertIs(page, context.page)
+        self.assertEqual(len(browser.contexts), 1)
+        self.assertEqual(page.goto_calls, [])
+        self.assertEqual(result.proxy_attempts, 1)
         self.assertEqual(
-            browser.proxy_configurations[0], browser.proxy_configurations[1]
+            browser.proxy_configurations,
+            [make_settings().gateway.playwright_proxy()],
         )
-
-    def test_stops_after_two_failed_proxy_checks(self):
-        class FakeResponse:
-            status = 503
-
-        class FakePage:
-            def goto(self, *_args, **_kwargs):
-                return FakeResponse()
-
-        class FakeContext:
-            def __init__(self):
-                self.closed = False
-
-            def set_default_navigation_timeout(self, _timeout):
-                return None
-
-            def new_page(self):
-                return FakePage()
-
-            def close(self):
-                self.closed = True
-
-        class FakeBrowser:
-            def __init__(self):
-                self.contexts = []
-
-            def new_context(self, **_kwargs):
-                context = FakeContext()
-                self.contexts.append(context)
-                return context
-
-        result = main.VisitResult(
-            "now", "https://example.com/", "Continuer", "Confirmer"
-        )
-        browser = FakeBrowser()
-        with self.assertRaises(RuntimeError):
-            main.open_verified_proxy_context(browser, make_settings(), result)
-        self.assertEqual(result.proxy_attempts, 2)
-        self.assertTrue(all(context.closed for context in browser.contexts))
 
 
 class BrowserLifecycleTests(unittest.TestCase):
     def test_launches_and_fully_closes_a_browser_for_each_target(self):
         class FakeResponse:
             status = 200
-
-            def __init__(self, ip_check=False):
-                self.ip_check = ip_check
-
-            def json(self):
-                return {"ip": "203.0.113.20", "country": "US"}
-
-            def text(self):
-                return "{}"
 
         class FakeButton:
             def __init__(self, page, name, changed_name):
@@ -362,6 +294,7 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.text_requests = []
                 self.coordinate_clicks = []
                 self.waits = []
+                self.goto_calls = []
                 self.screen_text = ""
                 self.mouse = FakeMouse(self)
                 self.main_frame = object()
@@ -370,8 +303,7 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.route_callback = callback
 
             def goto(self, url, **_kwargs):
-                if url == "https://ipinfo.io/json":
-                    return FakeResponse(ip_check=True)
+                self.goto_calls.append(url)
                 self.url = url
                 return FakeResponse()
 
@@ -446,16 +378,31 @@ class BrowserLifecycleTests(unittest.TestCase):
             main.Target("https://two.example/page", "Valider", "Terminer"),
         ]
 
-        with mock.patch("playwright.sync_api.sync_playwright", return_value=manager):
+        with (
+            mock.patch(
+                "playwright.sync_api.sync_playwright", return_value=manager
+            ),
+            mock.patch("main.random.randint", return_value=2) as choose_count,
+        ):
             report = main.run_targets(settings, targets)
 
+        choose_count.assert_called_once_with(129, 283)
         self.assertTrue(report.success)
-        self.assertEqual(len(chromium.browsers), 2)
+        self.assertEqual(report.repetition_count, 2)
+        self.assertEqual(
+            [result.repetition for result in report.results], [1, 1, 2, 2]
+        )
+        self.assertEqual(len(chromium.browsers), 4)
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
-        for browser, target in zip(chromium.browsers, targets, strict=True):
+        expected_targets = targets * 2
+        for browser, target in zip(
+            chromium.browsers, expected_targets, strict=True
+        ):
             self.assertEqual(len(browser.contexts), 1)
             self.assertTrue(browser.contexts[0].closed)
             page = browser.contexts[0].page
+            self.assertEqual(page.goto_calls, [target.url])
+            self.assertNotIn("https://ipinfo.io/json", page.goto_calls)
             self.assertEqual(
                 page.clicked_labels,
                 [target.button_text, page.changed_labels[target.button_text]],
