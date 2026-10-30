@@ -565,7 +565,7 @@ button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15
 .table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
 @media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites sur le bouton aux libellés configurés, puis attente de redirection.</p>
+<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : une nouvelle connexion à la passerelle proxy rotative pour chaque URL, deux clics explicites sur l’élément aux textes visibles configurés, puis attente de redirection.</p>
 {message_html}
 <section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
 <section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">

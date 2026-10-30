@@ -343,7 +343,7 @@ class BrowserLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.url = "about:blank"
                 self.clicked_labels = []
-                self.role_requests = []
+                self.text_requests = []
                 self.main_frame = object()
 
             def route(self, _pattern, callback):
@@ -361,9 +361,9 @@ class BrowserLifecycleTests(unittest.TestCase):
             def remove_listener(self, *_args):
                 return None
 
-            def get_by_role(self, role, name, exact):
-                self.role_requests.append((role, name, exact))
-                return FakeButton(self, name)
+            def get_by_text(self, text, exact):
+                self.text_requests.append((text, exact))
+                return FakeButton(self, text)
 
             def wait_for_load_state(self, *_args, **_kwargs):
                 return None
@@ -440,10 +440,10 @@ class BrowserLifecycleTests(unittest.TestCase):
                 [target.button_text, target.second_button_text],
             )
             self.assertEqual(
-                page.role_requests,
+                page.text_requests,
                 [
-                    ("button", target.button_text, True),
-                    ("button", target.second_button_text, True),
+                    (target.button_text, True),
+                    (target.second_button_text, True),
                 ],
             )
 

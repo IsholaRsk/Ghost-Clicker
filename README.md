@@ -88,7 +88,7 @@ Après connexion :
 3. vérifiez que la passerelle est indiquée comme configurée ;
 4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
 
-Les deux libellés après les séparateurs `|` doivent correspondre exactement aux noms accessibles successifs de l’élément ayant le rôle `button`. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
+Les deux libellés après les séparateurs `|` doivent correspondre exactement aux textes visibles successifs de l’élément cliquable. Celui-ci peut être un bouton ou un lien. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
 
 ## Lancer le bot
 
