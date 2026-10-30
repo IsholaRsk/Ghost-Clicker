@@ -505,23 +505,23 @@ def run_targets(
                     )
                     result.initial_status = response.status if response else None
                     require_successful_target_response(response)
-                    first_button = page.get_by_role(
-                        "button", name=target.button_text, exact=True
+                    first_click_target = page.get_by_text(
+                        target.button_text, exact=True
                     ).first
-                    first_button.wait_for(
+                    first_click_target.wait_for(
                         state="visible", timeout=settings.click_timeout_ms
                     )
-                    first_button.click(timeout=settings.click_timeout_ms)
+                    first_click_target.click(timeout=settings.click_timeout_ms)
 
-                    second_button = page.get_by_role(
-                        "button", name=target.second_button_text, exact=True
+                    second_click_target = page.get_by_text(
+                        target.second_button_text, exact=True
                     ).first
-                    second_button.wait_for(
+                    second_click_target.wait_for(
                         state="visible", timeout=settings.click_timeout_ms
                     )
                     previous_url = page.url
                     navigation_status["value"] = None
-                    second_button.click(timeout=settings.click_timeout_ms)
+                    second_click_target.click(timeout=settings.click_timeout_ms)
                     wait_for_redirect(
                         page, previous_url, settings.redirect_timeout_ms
                     )
