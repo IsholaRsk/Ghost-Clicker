@@ -139,11 +139,37 @@ class WebUploadTests(unittest.TestCase):
         self.assertTrue(settings["schedule_enabled"])
         self.assertEqual(settings["interval_minutes"], 120)
 
-    def test_target_upload_requires_both_successive_button_labels(self):
+    def test_target_upload_accepts_one_label_for_a_direct_redirect(self):
         response = self.post_file(
             "/upload-targets",
             "target_file",
             "https://first.example/page | Continuer\n",
+            "targets.txt",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        query = parse_qs(urlsplit(response.headers["Location"]).query)
+        self.assertEqual(query["targets"], ["1"])
+        self.assertEqual(
+            web.load_app_settings()["targets"],
+            [
+                {
+                    "url": "https://first.example/page",
+                    "button_text": "Continuer",
+                    "second_button_text": "",
+                }
+            ],
+        )
+        self.assertEqual(
+            web.targets_to_text(web.load_app_settings()),
+            "https://first.example/page | Continuer",
+        )
+
+    def test_target_upload_still_requires_the_first_label(self):
+        response = self.post_file(
+            "/upload-targets",
+            "target_file",
+            "https://first.example/page\n",
             "targets.txt",
         )
 

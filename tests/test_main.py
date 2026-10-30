@@ -63,6 +63,10 @@ class ValidationTests(unittest.TestCase):
 
     def test_validates_button_text(self):
         self.assertEqual(main.validate_button_text(" Continuer "), "Continuer")
+        self.assertEqual(main.validate_optional_button_text(""), "")
+        self.assertEqual(
+            main.validate_optional_button_text(" Confirmer "), "Confirmer"
+        )
         with self.assertRaises(main.ConfigurationError):
             main.validate_button_text("")
 
@@ -273,6 +277,8 @@ class BrowserLifecycleTests(unittest.TestCase):
             def click(self, **_kwargs):
                 self.page.clicked_labels.append(self.name)
                 self.page.screen_text = self.changed_name
+                if self.name == "Entrer":
+                    self.page.url += "/redirected"
 
         class FakeMouse:
             def __init__(self, page):
@@ -288,6 +294,7 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.changed_labels = {
                     "Continuer": "Continue in source language",
                     "Valider": "Finish in source language",
+                    "Entrer": "Direct redirect",
                 }
                 self.url = "about:blank"
                 self.clicked_labels = []
@@ -376,6 +383,7 @@ class BrowserLifecycleTests(unittest.TestCase):
         targets = [
             main.Target("https://one.example/page", "Continuer", "Confirmer"),
             main.Target("https://two.example/page", "Valider", "Terminer"),
+            main.Target("https://direct.example/page", "Entrer"),
         ]
 
         with (
@@ -390,9 +398,10 @@ class BrowserLifecycleTests(unittest.TestCase):
         self.assertTrue(report.success)
         self.assertEqual(report.repetition_count, 2)
         self.assertEqual(
-            [result.repetition for result in report.results], [1, 1, 2, 2]
+            [result.repetition for result in report.results],
+            [1, 1, 1, 2, 2, 2],
         )
-        self.assertEqual(len(chromium.browsers), 4)
+        self.assertEqual(len(chromium.browsers), 6)
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
         expected_targets = targets * 2
         for browser, target in zip(
@@ -403,16 +412,20 @@ class BrowserLifecycleTests(unittest.TestCase):
             page = browser.contexts[0].page
             self.assertEqual(page.goto_calls, [target.url])
             self.assertNotIn("https://ipinfo.io/json", page.goto_calls)
-            self.assertEqual(
-                page.clicked_labels,
-                [target.button_text, page.changed_labels[target.button_text]],
-            )
+            expected_clicks = [target.button_text]
+            if target.second_button_text:
+                expected_clicks.append(page.changed_labels[target.button_text])
+            self.assertEqual(page.clicked_labels, expected_clicks)
             self.assertEqual(
                 page.text_requests,
                 [(target.button_text, True)],
             )
-            self.assertEqual(page.coordinate_clicks, [(110, 220)])
-            self.assertEqual(page.waits, [500])
+            expected_coordinates = (
+                [(110, 220)] if target.second_button_text else []
+            )
+            expected_waits = [500] if target.second_button_text else []
+            self.assertEqual(page.coordinate_clicks, expected_coordinates)
+            self.assertEqual(page.waits, expected_waits)
 
 
 class TargetResponseTests(unittest.TestCase):
