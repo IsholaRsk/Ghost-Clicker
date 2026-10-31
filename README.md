@@ -21,6 +21,9 @@ Il effectue exactement un ou deux clics selon la ligne cible, ne remplit aucun f
 Ghost-Clicker/
 ├── main.py           # moteur Playwright
 ├── web.py            # interface web et planification
+├── database.py       # client de persistance Supabase
+├── supabase/
+│   └── migrations/   # schéma SQL versionné
 ├── Dockerfile        # Chromium/Playwright dans Docker
 ├── render.yaml       # Blueprint Render
 ├── .env.example      # modèle sans secret
@@ -46,7 +49,20 @@ Docker
 
 Le Blueprint utilise le plan Render **Starter** afin que la planification interne reste active. Un Web Service gratuit peut se mettre en veille et ne convient donc qu’aux lancements manuels.
 
-### 2. Préparer la passerelle et le fichier des cibles
+### 2. Relier Supabase
+
+Le projet Supabase dédié contient quatre espaces persistants :
+
+- la configuration et les cibles dans `ghost_clicker_settings` ;
+- le résumé de chaque exécution dans `ghost_clicker_reports` ;
+- chaque visite, sans troncature de l’historique, dans `ghost_clicker_visits` ;
+- un journal d’actions non sensible dans `ghost_clicker_events`.
+
+Le schéma versionné se trouve dans `supabase/migrations/`. Le Blueprint renseigne déjà `SUPABASE_URL`. Dans **Render → Environment**, ajoutez la valeur de `SUPABASE_SECRET_KEY` avec la clé serveur dédiée au bot. Cette clé ne doit jamais être placée dans Git, dans le navigateur ou dans un message.
+
+Les tables utilisent Row Level Security et n’accordent aucun accès aux rôles publics `anon` et `authenticated`. Seule la clé serveur peut lire ou écrire les données du bot. Si Supabase est momentanément indisponible, le service garde un cache local de secours et affiche l’état de la base dans la console.
+
+### 3. Préparer la passerelle et le fichier des cibles
 
 La passerelle Rayobyte utilise exactement cette valeur, sans lien `mailto:` ni mise en forme Markdown :
 
@@ -70,7 +86,7 @@ Avec deux champs, le bot clique une fois puis attend immédiatement la navigatio
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
-### 3. Se connecter au bot
+### 4. Se connecter au bot
 
 Après le build :
 
@@ -105,9 +121,9 @@ Le mode de répétition est choisi dans l’interface :
 - **Intervalle** : tire un nombre entre le minimum et le maximum indiqués ;
 - **Continu** : fonctionne par cycles successifs de 5 minutes. Au début de chaque cycle, un nouveau nombre de répétitions est tiré entre le minimum et le maximum configurés. Le bot continue jusqu’au clic sur **Arrêter** et termine proprement la visite en cours.
 
-Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites. En mode continu, les 1 000 résultats les plus récents sont conservés afin de borner l’utilisation de la mémoire.
+Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites. En mode continu, les 1 000 résultats les plus récents restent en mémoire afin de borner l’utilisation du processus, mais chaque visite terminée est enregistrée séparément dans Supabase et reste disponible dans l’export complet.
 
-Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
+Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, exécutions, visites et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. La passerelle Rayobyte demeure volontairement éphémère dans `/tmp` afin de ne pas enregistrer ses identifiants dans la base.
 
 ## Résultats
 
@@ -122,7 +138,7 @@ L’interface affiche :
 - réussite ou échec ;
 - message d’erreur.
 
-Le rapport temporaire est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul rapport progressif au lieu de créer des doublons.
+Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne durable dans Supabase. L’interface charge un historique récent pour rester réactive ; le CSV demande l’ensemble des rapports et visites disponibles.
 
 ## Navigateur sur Render
 
@@ -174,7 +190,9 @@ python .\main.py
 - authentification HTTP Basic avec `ADMIN_TOKEN` ;
 - protection CSRF des formulaires ;
 - jeton administrateur uniquement dans les variables Render ou `.env` ;
-- passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render ;
+- clé serveur Supabase uniquement dans les variables secrètes Render ou `.env` ;
+- RLS activée sur toutes les tables, sans politique d’accès public ;
+- passerelle proxy secrète conservée en mode `0600` dans `/tmp` sur Render et jamais copiée dans Supabase ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
 - exactement un clic par visite sans second libellé, ou deux clics au même emplacement lorsqu’il est configuré ;

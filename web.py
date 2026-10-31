@@ -18,6 +18,7 @@ from typing import Any
 
 from flask import Flask, Response, redirect, request, url_for
 
+from database import StorageError, SupabaseStorage
 from main import (
     DEFAULT_PROXY_GATEWAY_FILE,
     EXECUTION_MODES,
@@ -41,7 +42,13 @@ app = APP
 CSRF_TOKEN = secrets.token_urlsafe(32)
 STATE_LOCK = threading.Lock()
 REPORTS_LOCK = threading.Lock()
+DATABASE_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
+DATABASE_STATE: dict[str, Any] = {
+    "configured": False,
+    "connected": False,
+    "last_error": "",
+}
 RUN_STATE: dict[str, Any] = {
     "running": False,
     "stop_requested": False,
@@ -67,6 +74,57 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "repetition_min": 1,
     "repetition_max": 10,
 }
+
+
+def set_database_state(*, configured: bool, connected: bool, error: str = "") -> None:
+    with DATABASE_LOCK:
+        DATABASE_STATE.update(
+            configured=configured,
+            connected=connected,
+            last_error=error[:300],
+        )
+
+
+def supabase_storage() -> SupabaseStorage | None:
+    """Construit le client sans jamais conserver ni journaliser sa clé."""
+
+    configured = bool(
+        os.getenv("SUPABASE_URL", "").strip()
+        or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    )
+    try:
+        storage = SupabaseStorage.from_env()
+    except StorageError as exc:
+        set_database_state(
+            configured=configured,
+            connected=False,
+            error=str(exc),
+        )
+        return None
+    if storage is None:
+        set_database_state(configured=False, connected=False)
+    return storage
+
+
+def database_success() -> None:
+    set_database_state(configured=True, connected=True)
+
+
+def database_failure(exc: StorageError) -> None:
+    set_database_state(configured=True, connected=False, error=str(exc))
+
+
+def record_database_event(event_type: str, payload: dict[str, Any]) -> None:
+    """Journal d'audit non sensible ; une panne ne bloque jamais le bot."""
+
+    storage = supabase_storage()
+    if storage is None:
+        return
+    try:
+        storage.record_event(event_type, payload)
+        database_success()
+    except StorageError as exc:
+        database_failure(exc)
 
 
 def now_iso() -> str:
@@ -137,17 +195,7 @@ def bounded_integer(value: Any, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(parsed, maximum))
 
 
-def load_app_settings() -> dict[str, Any]:
-    path = settings_path()
-    if not path.exists():
-        return dict(DEFAULT_APP_SETTINGS)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return dict(DEFAULT_APP_SETTINGS)
-    if not isinstance(value, dict):
-        return dict(DEFAULT_APP_SETTINGS)
-
+def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
     mode = str(value.get("execution_mode", "fixed")).strip().lower()
     if mode not in EXECUTION_MODES:
         mode = "fixed"
@@ -176,8 +224,65 @@ def load_app_settings() -> dict[str, Any]:
     }
 
 
+def read_local_app_settings() -> dict[str, Any]:
+    path = settings_path()
+    if not path.exists():
+        return dict(DEFAULT_APP_SETTINGS)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return dict(DEFAULT_APP_SETTINGS)
+    if not isinstance(value, dict):
+        return dict(DEFAULT_APP_SETTINGS)
+    return normalize_app_settings(value)
+
+
+def load_app_settings() -> dict[str, Any]:
+    local_value = read_local_app_settings()
+    storage = supabase_storage()
+    if storage is None:
+        return local_value
+    try:
+        stored_value = storage.load_settings()
+        if stored_value is None:
+            # Première connexion : le cache local ou les valeurs par défaut
+            # initialisent la ligne persistante.
+            storage.save_settings(local_value)
+            stored_value = local_value
+        database_success()
+        normalized = normalize_app_settings(stored_value)
+    except StorageError as exc:
+        database_failure(exc)
+        return local_value
+    try:
+        atomic_write_json(settings_path(), normalized)
+    except OSError:
+        # Supabase reste la source de vérité si le cache /tmp est indisponible.
+        pass
+    return normalized
+
+
 def save_app_settings(value: dict[str, Any]) -> None:
-    atomic_write_json(settings_path(), value)
+    normalized = normalize_app_settings(value)
+    storage = supabase_storage()
+    database_requested = bool(
+        os.getenv("SUPABASE_URL", "").strip()
+        or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    )
+    if storage is None and database_requested:
+        with DATABASE_LOCK:
+            error = str(DATABASE_STATE["last_error"])
+        raise ConfigurationError(error or "Supabase n'est pas configuré.")
+    if storage is not None:
+        try:
+            storage.save_settings(normalized)
+            database_success()
+        except StorageError as exc:
+            database_failure(exc)
+            raise ConfigurationError(
+                "Impossible d'enregistrer les paramètres dans Supabase."
+            ) from exc
+    atomic_write_json(settings_path(), normalized)
 
 
 def read_reports_unlocked() -> list[dict[str, Any]]:
@@ -191,20 +296,37 @@ def read_reports_unlocked() -> list[dict[str, Any]]:
     return value if isinstance(value, list) else []
 
 
-def load_reports() -> list[dict[str, Any]]:
+def load_reports(*, all_data: bool = False) -> list[dict[str, Any]]:
+    storage = supabase_storage()
+    if storage is not None:
+        try:
+            reports = storage.load_reports(all_data=all_data)
+            database_success()
+            return reports
+        except StorageError as exc:
+            database_failure(exc)
     with REPORTS_LOCK:
         return read_reports_unlocked()
 
 
 def append_report(value: dict[str, Any]) -> None:
+    report = dict(value)
+    report.setdefault("run_id", secrets.token_urlsafe(12))
     with REPORTS_LOCK:
         reports = read_reports_unlocked()
-        reports.append(value)
+        reports.append(report)
         atomic_write_json(reports_path(), reports[-200:])
+    storage = supabase_storage()
+    if storage is not None:
+        try:
+            storage.append_report(report)
+            database_success()
+        except StorageError as exc:
+            database_failure(exc)
 
 
 def upsert_report(value: dict[str, Any]) -> None:
-    """Crée ou remplace le rapport d'une exécution en cours."""
+    """Crée ou remplace le rapport et sa dernière visite terminée."""
 
     run_id = str(value.get("run_id", "")).strip()
     if not run_id:
@@ -218,6 +340,39 @@ def upsert_report(value: dict[str, Any]) -> None:
         else:
             reports.append(value)
         atomic_write_json(reports_path(), reports[-200:])
+    storage = supabase_storage()
+    if storage is not None:
+        try:
+            storage.upsert_report(value)
+            database_success()
+        except StorageError as exc:
+            # Le cache local préserve la progression et le navigateur continue.
+            database_failure(exc)
+
+
+def clear_stored_reports() -> None:
+    storage = supabase_storage()
+    database_requested = bool(
+        os.getenv("SUPABASE_URL", "").strip()
+        or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    )
+    if storage is None and database_requested:
+        raise ConfigurationError(
+            "Impossible d'effacer les résultats tant que Supabase est indisponible."
+        )
+    if storage is not None:
+        try:
+            storage.clear_reports()
+            database_success()
+        except StorageError as exc:
+            database_failure(exc)
+            raise ConfigurationError(
+                "Impossible d'effacer les résultats dans Supabase."
+            ) from exc
+    path = reports_path()
+    with REPORTS_LOCK:
+        if path.exists():
+            path.unlink()
 
 
 def targets_from_settings(value: dict[str, Any]) -> list[Target]:
@@ -326,6 +481,7 @@ def read_browser_configuration() -> tuple[BrowserSettings | None, str]:
 
 
 def execute_job(source: str) -> None:
+    run_id = ""
     try:
         browser_settings = load_browser_settings(BASE_DIR)
         app_settings = load_app_settings()
@@ -346,6 +502,17 @@ def execute_job(source: str) -> None:
                 execution_mode=execution_mode,
                 planned_repetitions=repetition_count,
             )
+        record_database_event(
+            "run_started",
+            {
+                "run_id": run_id,
+                "source": source,
+                "execution_mode": execution_mode,
+                "planned_repetitions": repetition_count,
+                "target_count": len(targets),
+                "started_at": now_iso(),
+            },
+        )
 
         def report_value(
             report: RunReport, *, in_progress: bool
@@ -381,9 +548,31 @@ def execute_job(source: str) -> None:
             on_progress=update_progress,
         )
         upsert_report(report_value(report, in_progress=False))
+        record_database_event(
+            "run_finished",
+            {
+                "run_id": run_id,
+                "source": source,
+                "success": report.success,
+                "stopped": report.stopped,
+                "completed_repetitions": report.completed_repetitions,
+                "completed_visits": report.completed_visits,
+                "failed_visits": report.failed_visits,
+                "finished_at": report.finished_at,
+            },
+        )
         with STATE_LOCK:
             RUN_STATE["last_error"] = report.error
     except Exception as exc:
+        record_database_event(
+            "run_failed",
+            {
+                "run_id": run_id,
+                "source": source,
+                "error_type": type(exc).__name__,
+                "failed_at": now_iso(),
+            },
+        )
         with STATE_LOCK:
             RUN_STATE["last_error"] = str(exc)[:500]
     finally:
@@ -455,7 +644,13 @@ def scheduler_loop() -> None:
 @APP.get("/health")
 def health() -> Response:
     _settings, error = read_browser_configuration()
-    status = "degraded" if error else "ok"
+    with DATABASE_LOCK:
+        database_degraded = bool(
+            DATABASE_STATE["configured"]
+            and not DATABASE_STATE["connected"]
+            and DATABASE_STATE["last_error"]
+        )
+    status = "degraded" if error or database_degraded else "ok"
     return Response(f"{status}\n", content_type="text/plain; charset=utf-8")
 
 
@@ -483,6 +678,10 @@ def save_gateway() -> Response:
             raise ConfigurationError("La passerelle proxy est trop longue.")
         parse_proxy_gateway_text(content)
         atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+        record_database_event(
+            "gateway_updated",
+            {"configured": True, "updated_at": now_iso()},
+        )
         return redirect(url_for("home", gateway="1"), code=303)
     except ConfigurationError as exc:
         return redirect(url_for("home", error=str(exc)), code=303)
@@ -504,6 +703,10 @@ def upload_targets() -> Response:
             for target in targets
         ]
         save_app_settings(current)
+        record_database_event(
+            "targets_imported",
+            {"target_count": len(targets), "updated_at": now_iso()},
+        )
         return redirect(url_for("home", targets=str(len(targets))), code=303)
     except ConfigurationError as exc:
         return redirect(url_for("home", error=str(exc)), code=303)
@@ -546,6 +749,7 @@ def update_settings() -> Response:
             repetition_max,
         )
 
+        schedule_enabled = request.form.get("schedule_enabled") == "on"
         save_app_settings(
             {
                 "targets": [
@@ -556,13 +760,26 @@ def update_settings() -> Response:
                     }
                     for target in targets
                 ],
-                "schedule_enabled": request.form.get("schedule_enabled") == "on",
+                "schedule_enabled": schedule_enabled,
                 "interval_minutes": interval,
                 "execution_mode": execution_mode,
                 "repetition_count": repetition_count,
                 "repetition_min": repetition_min,
                 "repetition_max": repetition_max,
             }
+        )
+        record_database_event(
+            "settings_updated",
+            {
+                "target_count": len(targets),
+                "schedule_enabled": schedule_enabled,
+                "interval_minutes": interval,
+                "execution_mode": execution_mode,
+                "repetition_count": repetition_count,
+                "repetition_min": repetition_min,
+                "repetition_max": repetition_max,
+                "updated_at": now_iso(),
+            },
         )
         return redirect(url_for("home", saved="1"), code=303)
     except ConfigurationError as exc:
@@ -590,6 +807,11 @@ def stop_now() -> Response:
     try:
         require_csrf()
         requested = request_job_stop()
+        if requested:
+            record_database_event(
+                "stop_requested",
+                {"requested_at": now_iso()},
+            )
         return redirect(
             url_for("home", stopped="1" if requested else "0"), code=303
         )
@@ -601,10 +823,11 @@ def stop_now() -> Response:
 def clear_results() -> Response:
     try:
         require_csrf()
-        path = reports_path()
-        with REPORTS_LOCK:
-            if path.exists():
-                path.unlink()
+        clear_stored_reports()
+        record_database_event(
+            "reports_cleared",
+            {"cleared_at": now_iso()},
+        )
         return redirect(url_for("home", cleared="1"), code=303)
     except ConfigurationError as exc:
         return redirect(url_for("home", error=str(exc)), code=303)
@@ -636,7 +859,9 @@ def download_results() -> Response:
             "duree_ms",
         ]
     )
-    for report in load_reports():
+    # L'interface limite l'affichage récent ; l'export récupère tout
+    # l'historique persistant disponible.
+    for report in load_reports(all_data=True):
         for result in report.get("results", []):
             writer.writerow(
                 [
@@ -713,6 +938,8 @@ def home() -> str:
     reports = load_reports()
     with STATE_LOCK:
         state = dict(RUN_STATE)
+    with DATABASE_LOCK:
+        database_state = dict(DATABASE_STATE)
 
     messages: list[str] = []
     if request.args.get("saved") == "1":
@@ -735,6 +962,11 @@ def home() -> str:
         messages.append(request.args["error"][:500])
     if configuration_error:
         messages.append(f"Configuration serveur : {configuration_error}")
+    if database_state["configured"] and database_state["last_error"]:
+        messages.append(
+            f"Base de données : {database_state['last_error']} "
+            "Le cache local reste disponible."
+        )
     if state["last_error"]:
         messages.append(f"Dernière erreur : {state['last_error']}")
 
@@ -794,6 +1026,29 @@ def home() -> str:
     gateway_ready = proxy_gateway_file_path().exists()
     gateway_status = "Configurée" if gateway_ready else "Absente"
     gateway_class = "ready" if gateway_ready else "warning"
+    if database_state["connected"]:
+        database_status = "Supabase connectée"
+        database_class = "ready"
+        storage_note = (
+            "Supabase conserve durablement les paramètres, les cibles, les "
+            "exécutions et chaque visite, y compris au-delà des 1 000 "
+            "résultats gardés en mémoire en mode continu. Seuls les "
+            "identifiants Rayobyte restent éphémères sur le service."
+        )
+    elif database_state["configured"]:
+        database_status = "Connexion requise"
+        database_class = "warning"
+        storage_note = (
+            "Supabase est configurée mais momentanément indisponible. Le cache "
+            "local protège la session en cours ; vérifiez la clé serveur Render."
+        )
+    else:
+        database_status = "Cache local"
+        database_class = "warning"
+        storage_note = (
+            "Supabase n'est pas configurée. Les données restent dans le cache "
+            "local et peuvent disparaître lors d'un redéploiement."
+        )
     target_count = len(app_settings.get("targets", []))
 
     return f"""<!doctype html>
@@ -826,7 +1081,7 @@ h2{{margin-bottom:0;font-size:18px;line-height:1.3;letter-spacing:-.02em;font-we
 .fact{{border:1px solid var(--line);background:var(--surface);padding:7px 10px;border-radius:999px;color:var(--muted);font-size:11px;white-space:nowrap}}
 .notices{{display:grid;gap:8px;margin-bottom:18px}}
 .notice{{padding:11px 13px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:8px;background:#151d27;color:#c6d2df}}
-.status-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}}
+.status-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}}
 .stat{{min-width:0;padding:16px 18px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}}
 .stat-label{{display:block;margin-bottom:8px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}}
 .stat-value{{display:flex;align-items:center;gap:9px;margin:0;font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
@@ -925,6 +1180,7 @@ td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-sp
 
   <section class="status-grid" aria-label="État du service">
     <article class="stat"><span class="stat-label">État</span><p class="stat-value"><span class="status-dot {status_class}"></span>{status}</p></article>
+    <article class="stat"><span class="stat-label">Base de données</span><p class="stat-value"><span class="status-dot {database_class}"></span>{database_status}</p></article>
     <article class="stat"><span class="stat-label">Passerelle rotative</span><p class="stat-value"><span class="status-dot {gateway_class}"></span>{gateway_status}</p></article>
     <article class="stat"><span class="stat-label">Prochaine exécution</span><p class="stat-value"><time>{html.escape(str(state['next_run_at'] or 'Désactivée'))}</time></p></article>
   </section>
@@ -1000,7 +1256,7 @@ td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-sp
           <a class="button secondary" href="{url_for('download_results')}">Télécharger le CSV</a>
           <form class="inline-form" method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
         </div>
-        <p class="storage-note">Le tableau et le CSV sont mis à jour après chaque visite. Configuration et résultats restent temporaires et disparaissent lors d’un redéploiement. En mode continu, les 1 000 résultats les plus récents sont conservés.</p>
+        <p class="storage-note">Le tableau et le CSV sont mis à jour après chaque visite. {html.escape(storage_note)}</p>
       </div>
     </section>
   </div>

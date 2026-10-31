@@ -26,6 +26,8 @@ class WebUploadTests(unittest.TestCase):
                 "PROXY_GATEWAY_FILE": str(self.gateway_path),
                 "SETTINGS_FILE": str(self.settings_path),
                 "REPORTS_FILE": str(self.reports_path),
+                "SUPABASE_URL": "",
+                "SUPABASE_SECRET_KEY": "",
             },
         )
         self.environment.start()
@@ -47,6 +49,12 @@ class WebUploadTests(unittest.TestCase):
                 completed_visits=0,
                 continuous_window=0,
                 window_repetition_count=0,
+            )
+        with web.DATABASE_LOCK:
+            web.DATABASE_STATE.update(
+                configured=False,
+                connected=False,
+                last_error="",
             )
         web.STOP_EVENT.clear()
 
@@ -71,6 +79,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("color-scheme:dark", content)
         self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
+        self.assertIn("Base de données", content)
+        self.assertIn("Cache local", content)
         self.assertIn('value="continuous"', content)
         self.assertIn("cycle de 5 min", content)
         self.assertIn("Arrêter", content)
@@ -280,6 +290,69 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(
             web.load_app_settings()["execution_mode"], "continuous"
         )
+
+    def test_supabase_is_the_primary_settings_store_with_a_local_cache(self):
+        persistent_settings = {
+            "targets": [
+                {
+                    "url": "https://persistent.example/page",
+                    "button_text": "Continuer",
+                    "second_button_text": "",
+                }
+            ],
+            "schedule_enabled": True,
+            "interval_minutes": 180,
+            "execution_mode": "range",
+            "repetition_count": 4,
+            "repetition_min": 2,
+            "repetition_max": 6,
+        }
+        storage = mock.Mock()
+        storage.load_settings.return_value = persistent_settings
+
+        with mock.patch.object(
+            web.SupabaseStorage, "from_env", return_value=storage
+        ):
+            settings = web.load_app_settings()
+
+        self.assertEqual(settings, persistent_settings)
+        self.assertEqual(
+            web.read_local_app_settings(),
+            persistent_settings,
+        )
+        with web.DATABASE_LOCK:
+            self.assertTrue(web.DATABASE_STATE["connected"])
+
+    def test_partial_supabase_configuration_refuses_a_divergent_write(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SUPABASE_URL": "https://project.supabase.co",
+                    "SUPABASE_SECRET_KEY": "",
+                },
+            ),
+            self.assertRaises(main.ConfigurationError),
+        ):
+            web.save_app_settings(dict(web.DEFAULT_APP_SETTINGS))
+
+        self.assertFalse(self.settings_path.exists())
+
+    def test_progress_is_cached_and_sent_to_supabase(self):
+        storage = mock.Mock()
+        report = {
+            "run_id": "persistent_run",
+            "completed_visits": 1,
+            "results": [{"started_at": "now", "success": True}],
+        }
+
+        with mock.patch.object(
+            web.SupabaseStorage, "from_env", return_value=storage
+        ):
+            web.upsert_report(report)
+
+        storage.upsert_report.assert_called_once_with(report)
+        self.assertEqual(web.read_reports_unlocked(), [report])
 
     def test_stop_route_requests_a_clean_job_stop(self):
         with web.STATE_LOCK:
