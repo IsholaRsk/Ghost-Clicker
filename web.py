@@ -545,6 +545,7 @@ def home() -> str:
         messages.append(f"Dernière erreur : {state['last_error']}")
 
     status = "Exécution en cours" if state["running"] else "En attente"
+    status_class = "running" if state["running"] else "idle"
     refresh = '<meta http-equiv="refresh" content="5">' if state["running"] else ""
     run_disabled = " disabled" if state["running"] or configuration_error else ""
     edit_disabled = " disabled" if state["running"] else ""
@@ -554,44 +555,208 @@ def home() -> str:
     checked = " checked" if app_settings.get("schedule_enabled") else ""
     targets_text = html.escape(targets_to_text(app_settings))
     interval = int(app_settings.get("interval_minutes", 60))
-    gateway_status = (
-        "configurée" if proxy_gateway_file_path().exists() else "absente"
-    )
+    gateway_ready = proxy_gateway_file_path().exists()
+    gateway_status = "Configurée" if gateway_ready else "Absente"
+    gateway_class = "ready" if gateway_ready else "warning"
+    target_count = len(app_settings.get("targets", []))
 
     return f"""<!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-{refresh}<title>Ghost-Clicker</title><style>
-:root{{--bg:#07111f;--panel:#10243a;--line:#29445f;--text:#eef5fb;--muted:#93a9c0;--accent:#55dfc1;--blue:#75aaff;--red:#ff7583}}
-*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 8% 0,#173d5e,var(--bg) 38%);color:var(--text);font:14px/1.55 Segoe UI,Arial,sans-serif;min-height:100vh}}
-main{{max-width:1200px;margin:auto;padding:30px 20px}}h1{{font-size:32px;margin:0}}h1 span{{color:var(--accent)}}p{{color:var(--muted)}}
-.grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}.card{{background:linear-gradient(145deg,#132c47,var(--panel));border:1px solid var(--line);border-radius:16px;padding:20px;margin:16px 0}}
-label{{display:block;font-weight:700;margin:11px 0 5px}}textarea,input[type=number],input[type=file],input[type=password]{{width:100%;background:#081827;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:11px;font:inherit}}textarea{{min-height:190px;resize:vertical}}
-button,a.button{{display:inline-block;border:0;border-radius:9px;padding:11px 15px;margin:8px 8px 0 0;font-weight:750;text-decoration:none;cursor:pointer}}button{{background:var(--accent);color:#06141d}}button.secondary,a.button{{background:var(--blue);color:#07111f}}button.danger{{background:var(--red)}}button:disabled{{opacity:.4;cursor:not-allowed}}
-.notice{{padding:11px 14px;margin:10px 0;border-left:3px solid var(--blue);background:#10243a;color:#dce8f4}}code{{color:#b6f7e8}}.meta{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.meta div{{background:#0b1b2b;padding:12px;border-radius:10px}}.meta small{{display:block;color:var(--muted)}}
-.table-wrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:1000px}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{color:var(--muted);font-size:11px;text-transform:uppercase}}td.url,td.error{{max-width:270px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.badge{{padding:4px 7px;border-radius:20px;font-size:10px;font-weight:800}}.success{{color:var(--accent);background:#55dfc119}}.failure{{color:var(--red);background:#ff758319}}.empty{{text-align:center;color:var(--muted)}}
-@media(max-width:800px){{.grid,.meta{{grid-template-columns:1fr}}}}
-</style></head><body><main>
-<h1>Ghost<span>Clicker</span></h1><p>Test fonctionnel autorisé : chaque lancement choisit aléatoirement entre 129 et 283 répétitions. Chaque visite ouvre directement la cible via une nouvelle connexion proxy, effectue un clic si un seul libellé est configuré ou deux clics si le second est présent, puis attend la redirection.</p>
-{message_html}
-<section class="card"><div class="meta"><div><small>État</small><strong>{status}</strong></div><div><small>Passerelle rotative</small><strong>{gateway_status}</strong></div><div><small>Prochaine exécution</small><strong>{html.escape(str(state['next_run_at'] or 'désactivée'))}</strong></div></div></section>
-<section class="card"><h2>Configurer la passerelle et les cibles</h2><div class="grid">
-<form method="post" action="{url_for('save_gateway')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Passerelle Rayobyte — username:password@host:port</label><input type="password" name="gateway" autocomplete="off" required><button type="submit"{edit_disabled}>Enregistrer la passerelle</button></form>
-<form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><label>Fichier cibles — URL | premier libellé exact [| second libellé]</label><input type="file" name="target_file" accept=".txt,text/plain" required><button type="submit"{edit_disabled}>Importer les URL</button></form>
-</div></section>
-<div class="grid"><section class="card"><h2>Paramètres en ligne</h2>
-<form method="post" action="{url_for('update_settings')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-<label for="targets">Une ligne par cible : URL | premier libellé exact [| second libellé optionnel]</label>
-<textarea id="targets" name="targets" placeholder="Un clic : https://site-autorise.example/page | Continuer&#10;Deux clics : https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
-<label for="interval">Intervalle planifié en minutes (minimum 60)</label><input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
-<label><input type="checkbox" name="schedule_enabled"{checked}> Activer la planification</label>
-<button type="submit"{edit_disabled}>Enregistrer</button></form></section>
-<section class="card"><h2>Exécution</h2><p>À chaque lancement, le bot choisit un nombre aléatoire inclus entre 129 et 283 et répète toute la liste des cibles ce nombre de fois. Pour chaque visite, Chromium démarre avec une nouvelle connexion à la passerelle et ouvre immédiatement la cible sans vérifier l’IP du proxy. Avec un seul libellé, le premier clic doit rediriger directement. Avec deux libellés, le bot clique une seconde fois au même endroit après 500 ms. Il attend ensuite la redirection et ferme complètement Chromium.</p>
-<form method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
-<a class="button" href="{url_for('download_results')}">Télécharger le CSV</a>
-<form method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
-<p>Les listes, paramètres et résultats utilisent un stockage temporaire et disparaissent lors d’un redéploiement.</p></section></div>
-<section class="card"><h2>Résultats</h2><div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Répétition</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé (optionnel)</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div></section>
-</main></body></html>"""
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{refresh}<title>Ghost Clicker — Console</title>
+<style>
+:root{{--canvas:#f4f4f1;--surface:#ffffff;--surface-soft:#fafaf8;--ink:#181817;--muted:#6f706b;--line:#deded8;--line-strong:#c9c9c1;--accent:#222220;--success:#24734a;--success-soft:#edf7f1;--warning:#9a6700;--warning-soft:#fff8e6;--danger:#b42318;--danger-soft:#fff3f2;--focus:#7c8da5}}
+*{{box-sizing:border-box}}
+html{{background:var(--canvas)}}
+body{{margin:0;min-height:100vh;background:var(--canvas);color:var(--ink);font:14px/1.55 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}}
+a{{color:inherit}}
+.shell{{width:min(1160px,calc(100% - 40px));margin:0 auto}}
+.topbar{{background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;backdrop-filter:blur(10px)}}
+.topbar-inner{{height:64px;display:flex;align-items:center;justify-content:space-between;gap:24px}}
+.brand{{display:inline-flex;align-items:center;gap:11px;text-decoration:none;font-size:15px;font-weight:680;letter-spacing:-.01em}}
+.brand-mark{{width:28px;height:28px;display:grid;place-items:center;background:var(--ink);color:#fff;border-radius:7px;font-size:12px;font-weight:800}}
+.topbar-note{{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}}
+.service-dot{{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 0 3px var(--success-soft)}}
+main{{padding:52px 0 64px}}
+.hero{{display:flex;align-items:flex-end;justify-content:space-between;gap:40px;margin-bottom:30px}}
+.eyebrow{{display:block;margin-bottom:9px;color:var(--muted);font-size:11px;font-weight:750;letter-spacing:.13em;text-transform:uppercase}}
+h1,h2,p{{margin-top:0}}
+h1{{margin-bottom:12px;font-size:clamp(30px,5vw,46px);line-height:1.08;letter-spacing:-.045em;font-weight:720}}
+h2{{margin-bottom:0;font-size:18px;line-height:1.3;letter-spacing:-.02em;font-weight:680}}
+.hero-copy{{max-width:680px;margin-bottom:0;color:var(--muted);font-size:15px}}
+.hero-facts{{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:330px}}
+.fact{{border:1px solid var(--line);background:var(--surface);padding:7px 10px;border-radius:999px;color:var(--muted);font-size:11px;white-space:nowrap}}
+.notices{{display:grid;gap:8px;margin-bottom:18px}}
+.notice{{padding:11px 13px;border:1px solid #d8e1ea;border-left:3px solid #60758d;border-radius:8px;background:#f6f8fa;color:#364759}}
+.status-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}}
+.stat{{min-width:0;padding:16px 18px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}}
+.stat-label{{display:block;margin-bottom:8px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}}
+.stat-value{{display:flex;align-items:center;gap:9px;margin:0;font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.stat-value time{{overflow:hidden;text-overflow:ellipsis}}
+.status-dot{{width:8px;height:8px;flex:0 0 auto;border-radius:50%}}
+.status-dot.idle,.status-dot.ready{{background:var(--success)}}
+.status-dot.running{{background:#4d6fa8;animation:pulse 1.7s ease-in-out infinite}}
+.status-dot.warning{{background:var(--warning)}}
+@keyframes pulse{{50%{{opacity:.38}}}}
+.panel{{margin-bottom:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}}
+.panel-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:20px 22px 17px;border-bottom:1px solid var(--line)}}
+.panel-heading p{{margin:5px 0 0;color:var(--muted);font-size:13px}}
+.count{{flex:0 0 auto;padding:5px 9px;border-radius:999px;background:var(--surface-soft);border:1px solid var(--line);color:var(--muted);font-size:11px}}
+.panel-body{{padding:22px}}
+.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}
+.content-grid{{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(340px,.92fr);gap:16px;align-items:start}}
+.content-grid .panel{{height:100%}}
+.form-block{{padding:16px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft)}}
+.form-title{{margin:0 0 3px;font-size:13px;font-weight:680}}
+.form-hint{{margin:0 0 13px;color:var(--muted);font-size:12px}}
+label{{display:block;margin:14px 0 6px;color:#3f403d;font-size:12px;font-weight:650}}
+.form-block label:first-of-type{{margin-top:0}}
+textarea,input[type=number],input[type=file],input[type=password]{{width:100%;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);color:var(--ink);padding:10px 11px;font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}}
+textarea{{min-height:190px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.6}}
+input:focus,textarea:focus{{border-color:var(--focus);box-shadow:0 0 0 3px rgba(124,141,165,.16)}}
+input[type=file]{{padding:6px}}
+input[type=file]::file-selector-button{{margin-right:10px;border:0;border-radius:5px;background:#ecece8;color:var(--ink);padding:7px 9px;font:inherit;font-size:12px;cursor:pointer}}
+.toggle-row{{display:flex;align-items:center;gap:9px;margin-top:15px;font-size:13px;font-weight:550}}
+.toggle-row input{{width:16px;height:16px;margin:0;accent-color:var(--ink)}}
+button,a.button{{display:inline-flex;align-items:center;justify-content:center;min-height:38px;margin:14px 7px 0 0;border:1px solid var(--ink);border-radius:7px;padding:8px 13px;background:var(--ink);color:#fff;font:inherit;font-size:12px;font-weight:680;text-decoration:none;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}}
+button:hover,a.button:hover{{background:#383836;border-color:#383836}}
+button:active,a.button:active{{transform:translateY(1px)}}
+button:focus-visible,a.button:focus-visible{{outline:3px solid rgba(124,141,165,.3);outline-offset:2px}}
+button:disabled{{opacity:.42;cursor:not-allowed;transform:none}}
+a.button.secondary,button.secondary{{border-color:var(--line-strong);background:var(--surface);color:var(--ink)}}
+a.button.secondary:hover,button.secondary:hover{{border-color:#9d9d96;background:var(--surface-soft)}}
+button.danger{{border-color:#e7c3bf;background:var(--surface);color:var(--danger)}}
+button.danger:hover{{border-color:#d89e98;background:var(--danger-soft)}}
+.inline-form{{display:inline}}
+.run-copy{{margin:0 0 18px;color:var(--muted)}}
+.run-specs{{margin:0;border-top:1px solid var(--line)}}
+.run-specs div{{display:flex;justify-content:space-between;gap:18px;padding:11px 0;border-bottom:1px solid var(--line)}}
+.run-specs dt{{color:var(--muted)}}
+.run-specs dd{{margin:0;text-align:right;font-weight:620}}
+.actions{{display:flex;align-items:center;flex-wrap:wrap;margin-top:4px}}
+.storage-note{{margin:17px 0 0;color:var(--muted);font-size:11px}}
+.table-wrap{{overflow:auto}}
+table{{width:100%;min-width:1120px;border-collapse:collapse}}
+th,td{{padding:11px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}
+th{{position:sticky;top:0;background:var(--surface-soft);color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.07em;text-transform:uppercase}}
+tbody tr:last-child td{{border-bottom:0}}
+tbody tr:hover{{background:#fafaf8}}
+td{{font-size:12px}}
+td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.badge{{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.04em}}
+.success{{background:var(--success-soft);color:var(--success)}}
+.failure{{background:var(--danger-soft);color:var(--danger)}}
+.empty{{padding:34px;text-align:center;color:var(--muted)}}
+.footer{{padding-top:8px;color:var(--muted);font-size:11px;text-align:center}}
+@media(max-width:860px){{.hero{{display:block}}.hero-facts{{justify-content:flex-start;max-width:none;margin-top:18px}}.status-grid,.grid,.content-grid{{grid-template-columns:1fr}}.content-grid .panel{{height:auto}}}}
+@media(max-width:560px){{.shell{{width:min(100% - 24px,1160px)}}.topbar-note{{display:none}}main{{padding-top:34px}}.hero{{margin-bottom:22px}}.status-grid{{gap:8px}}.stat{{padding:14px}}.panel-header,.panel-body{{padding:17px}}.actions{{align-items:stretch}}.actions button,.actions a.button,.actions form{{width:100%;margin-right:0}}.actions form{{display:block}}.actions form button{{width:100%}}}}
+@media(prefers-reduced-motion:reduce){{*{{scroll-behavior:auto!important;animation:none!important;transition:none!important}}}}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="shell topbar-inner">
+    <a class="brand" href="{url_for('home')}" aria-label="Accueil Ghost Clicker"><span class="brand-mark">G</span><span>Ghost Clicker</span></a>
+    <div class="topbar-note"><span class="service-dot"></span>Console d’exécution sécurisée</div>
+  </div>
+</header>
+<main class="shell">
+  <section class="hero">
+    <div>
+      <span class="eyebrow">Automatisation</span>
+      <h1>Console d’exécution</h1>
+      <p class="hero-copy">Configurez les cibles, contrôlez la planification et consultez les résultats depuis un espace unique.</p>
+    </div>
+    <div class="hero-facts" aria-label="Règles d’exécution">
+      <span class="fact">129–283 répétitions / lancement</span>
+      <span class="fact">1 ou 2 clics / visite</span>
+      <span class="fact">Navigateur isolé</span>
+    </div>
+  </section>
+
+  <div class="notices" aria-live="polite">{message_html}</div>
+
+  <section class="status-grid" aria-label="État du service">
+    <article class="stat"><span class="stat-label">État</span><p class="stat-value"><span class="status-dot {status_class}"></span>{status}</p></article>
+    <article class="stat"><span class="stat-label">Passerelle rotative</span><p class="stat-value"><span class="status-dot {gateway_class}"></span>{gateway_status}</p></article>
+    <article class="stat"><span class="stat-label">Prochaine exécution</span><p class="stat-value"><time>{html.escape(str(state['next_run_at'] or 'Désactivée'))}</time></p></article>
+  </section>
+
+  <section class="panel">
+    <header class="panel-header">
+      <div class="panel-heading"><span class="eyebrow">Configuration</span><h2>Passerelle et cibles</h2><p>Les données sensibles restent stockées temporairement sur le service.</p></div>
+      <span class="count">{target_count} cible(s)</span>
+    </header>
+    <div class="panel-body grid">
+      <div class="form-block">
+        <p class="form-title">Passerelle Rayobyte</p>
+        <p class="form-hint">Une seule passerelle rotative, conservée de façon éphémère.</p>
+        <form method="post" action="{url_for('save_gateway')}">
+          <input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
+          <label for="gateway">Identifiants de connexion</label>
+          <input id="gateway" type="password" name="gateway" autocomplete="off" placeholder="username:password@host:port" required>
+          <button type="submit"{edit_disabled}>Enregistrer</button>
+        </form>
+      </div>
+      <div class="form-block">
+        <p class="form-title">Importer les cibles</p>
+        <p class="form-hint">Format : URL | premier libellé [| second libellé].</p>
+        <form method="post" action="{url_for('upload_targets')}" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
+          <label for="target_file">Fichier texte UTF-8</label>
+          <input id="target_file" type="file" name="target_file" accept=".txt,text/plain" required>
+          <button type="submit"{edit_disabled}>Importer</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <div class="content-grid">
+    <section class="panel">
+      <header class="panel-header"><div class="panel-heading"><span class="eyebrow">Paramètres</span><h2>Cibles et planification</h2><p>Modifiez la liste sans redéployer le service.</p></div></header>
+      <div class="panel-body">
+        <form method="post" action="{url_for('update_settings')}">
+          <input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
+          <label for="targets">Une ligne par cible</label>
+          <textarea id="targets" name="targets" placeholder="Un clic : https://site-autorise.example/page | Continuer&#10;Deux clics : https://site-autorise.example/page | Continuer | Confirmer">{targets_text}</textarea>
+          <label for="interval">Intervalle planifié en minutes</label>
+          <input id="interval" type="number" name="interval_minutes" min="60" max="10080" value="{interval}">
+          <label class="toggle-row"><input type="checkbox" name="schedule_enabled"{checked}>Activer la planification</label>
+          <button type="submit"{edit_disabled}>Enregistrer les paramètres</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="panel-header"><div class="panel-heading"><span class="eyebrow">Exécution</span><h2>Lancer le scénario</h2><p>Une seule exécution peut être active à la fois.</p></div></header>
+      <div class="panel-body">
+        <p class="run-copy">Chromium ouvre directement chaque cible via une nouvelle connexion. Un seul libellé déclenche un clic ; un second libellé déclenche le deuxième clic après 500 ms.</p>
+        <dl class="run-specs">
+          <div><dt>Répétitions</dt><dd>129 à 283, aléatoires</dd></div>
+          <div><dt>Contrôle IP préalable</dt><dd>Aucun</dd></div>
+          <div><dt>Fermeture navigateur</dt><dd>Après chaque visite</dd></div>
+        </dl>
+        <div class="actions">
+          <form class="inline-form" method="post" action="{url_for('run_now')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button type="submit"{run_disabled}>Lancer maintenant</button></form>
+          <a class="button secondary" href="{url_for('download_results')}">Télécharger le CSV</a>
+          <form class="inline-form" method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
+        </div>
+        <p class="storage-note">Configuration et résultats temporaires : ils disparaissent lors d’un redéploiement.</p>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <header class="panel-header"><div class="panel-heading"><span class="eyebrow">Historique</span><h2>Résultats</h2><p>Dernières visites enregistrées par le service.</p></div></header>
+    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Répétition</th><th>Proxy</th><th>URL initiale</th><th>Premier libellé</th><th>Second libellé</th><th>URL finale</th><th>Résultat</th><th>Erreur</th></tr></thead><tbody>{render_result_rows(reports)}</tbody></table></div>
+  </section>
+
+  <footer class="footer">Ghost Clicker · Interface d’administration</footer>
+</main>
+</body>
+</html>"""
 
 
 scheduler = threading.Thread(target=scheduler_loop, daemon=True)
