@@ -10,6 +10,14 @@ services:
     envVars:
       - key: ADMIN_TOKEN
         generateValue: true
+      # URL publique du projet Supabase Ghost Clicker.
+      - key: SUPABASE_URL
+        value: https://jecebpvujpthnblwixpb.supabase.co
+      # À renseigner dans Render avec la clé serveur dédiée ; jamais dans Git.
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_TIMEOUT_SECONDS
+        value: "10"
       - key: PROXY_GATEWAY_FILE
         value: /tmp/ghost-clicker-proxy-gateway.txt
       - key: HEADLESS
