@@ -34,12 +34,18 @@ class WebUploadTests(unittest.TestCase):
         with web.STATE_LOCK:
             web.RUN_STATE.update(
                 running=False,
+                stop_requested=False,
                 source="",
                 started_at="",
                 finished_at="",
                 last_error="",
                 next_run_at="",
+                execution_mode="fixed",
+                planned_repetitions=1,
+                completed_repetitions=0,
+                completed_visits=0,
             )
+        web.STOP_EVENT.clear()
 
     def tearDown(self):
         self.environment.stop()
@@ -62,6 +68,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("color-scheme:dark", content)
         self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
+        self.assertIn('value="continuous"', content)
+        self.assertIn("Arrêter", content)
+        self.assertNotIn("129–283", content)
         self.assertNotIn("--canvas:#f4f4f1", content)
         self.assertNotIn("radial-gradient", content)
 
@@ -225,10 +234,70 @@ class WebUploadTests(unittest.TestCase):
             ],
         )
 
-    def test_csv_includes_the_random_repetition_without_ip_check_columns(self):
+    def test_settings_support_a_custom_range_and_continuous_mode(self):
+        target = "https://edited.example/page | Continuer"
+        response = self.client.post(
+            "/settings",
+            data={
+                "csrf_token": web.CSRF_TOKEN,
+                "targets": target,
+                "interval_minutes": "60",
+                "execution_mode": "range",
+                "repetition_count": "7",
+                "repetition_min": "3",
+                "repetition_max": "9",
+            },
+            headers=self.headers,
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        settings = web.load_app_settings()
+        self.assertEqual(settings["execution_mode"], "range")
+        self.assertEqual(settings["repetition_count"], 7)
+        self.assertEqual(settings["repetition_min"], 3)
+        self.assertEqual(settings["repetition_max"], 9)
+
+        response = self.client.post(
+            "/settings",
+            data={
+                "csrf_token": web.CSRF_TOKEN,
+                "targets": target,
+                "interval_minutes": "60",
+                "execution_mode": "continuous",
+                "repetition_count": "7",
+                "repetition_min": "3",
+                "repetition_max": "9",
+            },
+            headers=self.headers,
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            web.load_app_settings()["execution_mode"], "continuous"
+        )
+
+    def test_stop_route_requests_a_clean_job_stop(self):
+        with web.STATE_LOCK:
+            web.RUN_STATE["running"] = True
+
+        response = self.client.post(
+            "/stop",
+            data={"csrf_token": web.CSRF_TOKEN},
+            headers=self.headers,
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertTrue(web.STOP_EVENT.is_set())
+        with web.STATE_LOCK:
+            self.assertTrue(web.RUN_STATE["stop_requested"])
+
+    def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
         web.append_report(
             {
                 "source": "manuel",
+                "execution_mode": "range",
                 "repetition_count": 200,
                 "results": [
                     {
@@ -249,8 +318,9 @@ class WebUploadTests(unittest.TestCase):
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("mode_execution,repetition", content)
         self.assertIn("repetition,repetitions_planifiees", content)
-        self.assertIn(",7,200,passerelle-rotative,1,", content)
+        self.assertIn(",range,7,200,passerelle-rotative,1,", content)
         self.assertNotIn("ip_sortie", content)
         self.assertNotIn("pays", content)
 

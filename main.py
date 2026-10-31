@@ -1,4 +1,4 @@
-"""Moteur Playwright : répétitions aléatoires et un ou deux clics par cible."""
+"""Moteur Playwright : répétitions configurables et un ou deux clics par cible."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import random
 import re
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +17,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 DEFAULT_PROXY_GATEWAY_FILE = "/tmp/ghost-clicker-proxy-gateway.txt"
-MIN_RUN_REPETITIONS = 129
-MAX_RUN_REPETITIONS = 283
+EXECUTION_MODES = frozenset({"fixed", "range", "continuous"})
+MAX_CONFIGURED_REPETITIONS = 10_000
+MAX_CONTINUOUS_RESULTS = 1_000
 
 
 class ConfigurationError(ValueError):
@@ -78,7 +79,13 @@ class VisitResult:
 @dataclass
 class RunReport:
     started_at: str
-    repetition_count: int = 0
+    execution_mode: str = "fixed"
+    repetition_count: int | None = 1
+    completed_repetitions: int = 0
+    completed_visits: int = 0
+    failed_visits: int = 0
+    stopped: bool = False
+    discarded_results: int = 0
     finished_at: str = ""
     success: bool = False
     error: str = ""
@@ -124,6 +131,41 @@ def parse_positive_int(
     if parsed < minimum:
         raise ConfigurationError(f"{name} doit être supérieur ou égal à {minimum}.")
     return parsed
+
+
+def resolve_repetition_count(
+    mode: str,
+    fixed_count: int,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    """Valide le plan et renvoie le total, ou None pour le mode continu."""
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in EXECUTION_MODES:
+        raise ConfigurationError(
+            "Le mode d'exécution doit être fixed, range ou continuous."
+        )
+    values = {
+        "nombre de répétitions": fixed_count,
+        "minimum de répétitions": minimum,
+        "maximum de répétitions": maximum,
+    }
+    for label, value in values.items():
+        if value < 1 or value > MAX_CONFIGURED_REPETITIONS:
+            raise ConfigurationError(
+                f"Le {label} doit être compris entre 1 et "
+                f"{MAX_CONFIGURED_REPETITIONS}."
+            )
+    if minimum > maximum:
+        raise ConfigurationError(
+            "Le minimum de répétitions ne peut pas dépasser le maximum."
+        )
+    if normalized_mode == "continuous":
+        return None
+    if normalized_mode == "range":
+        return random.randint(minimum, maximum)
+    return fixed_count
 
 
 def parse_nonnegative_float(value: str | None, default: float, name: str) -> float:
@@ -498,12 +540,39 @@ def visit_target(
     return result
 
 
+def wait_with_cancellation(
+    seconds: float,
+    should_stop: Callable[[], bool] | None,
+) -> bool:
+    """Attend sans retarder une demande d'arrêt ; renvoie True si elle arrive."""
+
+    deadline = time.monotonic() + seconds
+    while True:
+        if should_stop is not None and should_stop():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.25, remaining))
+
+
 def run_targets(
     settings: BrowserSettings,
     targets: Sequence[Target],
+    repetition_count: int | None = 1,
+    execution_mode: str = "fixed",
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[RunReport], None] | None = None,
 ) -> RunReport:
     if not targets:
         raise ConfigurationError("Aucune URL n'est configurée.")
+    if repetition_count is not None and not (
+        1 <= repetition_count <= MAX_CONFIGURED_REPETITIONS
+    ):
+        raise ConfigurationError(
+            "Le nombre de répétitions doit être compris entre 1 et "
+            f"{MAX_CONFIGURED_REPETITIONS}."
+        )
 
     try:
         from playwright.sync_api import sync_playwright
@@ -512,35 +581,85 @@ def run_targets(
             "Playwright n'est pas installé. Exécutez pip install -r requirements.txt."
         ) from exc
 
-    repetition_count = random.randint(MIN_RUN_REPETITIONS, MAX_RUN_REPETITIONS)
+    continuous = repetition_count is None
     report = RunReport(
-        started_at=now_iso(), repetition_count=repetition_count
+        started_at=now_iso(),
+        execution_mode="continuous" if continuous else execution_mode,
+        repetition_count=repetition_count,
     )
-    total_visits = repetition_count * len(targets)
-    completed_visits = 0
+
+    def stop_requested() -> bool:
+        return bool(should_stop is not None and should_stop())
+
+    def notify_progress() -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(report)
+        except Exception:
+            # Le suivi d'interface ne doit jamais interrompre le navigateur.
+            pass
 
     with sync_playwright() as playwright:
         try:
-            for repetition in range(1, repetition_count + 1):
-                for target in targets:
-                    report.results.append(
-                        visit_target(playwright, settings, target, repetition)
+            repetition = 0
+            while continuous or repetition < (repetition_count or 0):
+                if stop_requested():
+                    report.stopped = True
+                    break
+                repetition += 1
+
+                for target_index, target in enumerate(targets):
+                    if stop_requested():
+                        report.stopped = True
+                        break
+
+                    result = visit_target(
+                        playwright, settings, target, repetition
                     )
-                    completed_visits += 1
+                    report.results.append(result)
+                    report.completed_visits += 1
+                    if not result.success:
+                        report.failed_visits += 1
+                    if continuous and len(report.results) > MAX_CONTINUOUS_RESULTS:
+                        del report.results[0]
+                        report.discarded_results += 1
+                    if target_index == len(targets) - 1:
+                        report.completed_repetitions = repetition
+                    notify_progress()
+
+                    more_targets = target_index < len(targets) - 1
+                    more_repetitions = continuous or repetition < (
+                        repetition_count or 0
+                    )
                     if (
                         settings.delay_between_targets_seconds
-                        and completed_visits < total_visits
+                        and (more_targets or more_repetitions)
+                        and wait_with_cancellation(
+                            settings.delay_between_targets_seconds,
+                            should_stop,
+                        )
                     ):
-                        time.sleep(settings.delay_between_targets_seconds)
+                        report.stopped = True
+                        break
 
-            report.success = bool(report.results) and all(
-                result.success for result in report.results
+                if report.stopped:
+                    break
+
+            completed_plan = continuous or (
+                report.completed_repetitions == repetition_count
+            )
+            report.success = (
+                report.completed_visits > 0
+                and report.failed_visits == 0
+                and completed_plan
             )
         except Exception as exc:
             report.error = redact_error(exc, settings)
             report.success = False
         finally:
             report.finished_at = now_iso()
+            notify_progress()
     return report
 
 
@@ -557,7 +676,25 @@ def main() -> int:
                 os.getenv("SECOND_BUTTON_TEXT", "")
             ),
         )
-        report = run_targets(settings, [target])
+        execution_mode = os.getenv("EXECUTION_MODE", "fixed").strip().lower()
+        repetition_count = resolve_repetition_count(
+            execution_mode,
+            parse_positive_int(
+                os.getenv("REPETITION_COUNT"), 1, "REPETITION_COUNT"
+            ),
+            parse_positive_int(
+                os.getenv("REPETITION_MIN"), 1, "REPETITION_MIN"
+            ),
+            parse_positive_int(
+                os.getenv("REPETITION_MAX"), 10, "REPETITION_MAX"
+            ),
+        )
+        report = run_targets(
+            settings,
+            [target],
+            repetition_count=repetition_count,
+            execution_mode=execution_mode,
+        )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return 0 if report.success else 1
     except (ConfigurationError, RuntimeError) as exc:

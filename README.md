@@ -1,6 +1,6 @@
 # Ghost-Clicker — Web Service Docker
 
-Ghost-Clicker est un outil de **test fonctionnel autorisé**. À chaque lancement, il choisit aléatoirement un nombre entier inclus entre **129 et 283**, puis répète toute la liste des cibles ce nombre de fois. Pour chaque visite, il :
+Ghost-Clicker est un outil de **test fonctionnel autorisé**. Chaque lancement utilise l’un des trois modes configurables : un nombre fixe de répétitions, un total tiré dans un intervalle défini, ou une exécution continue jusqu’à l’arrêt manuel. Pour chaque visite, il :
 
 1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
 2. ouvre immédiatement la page cible dans Chromium headless ;
@@ -99,7 +99,13 @@ Deux modes sont disponibles :
 - **Lancer maintenant** : exécution manuelle ;
 - **Planification** : intervalle configurable entre 60 et 10080 minutes.
 
-Chaque lancement manuel ou planifié tire un nouveau nombre aléatoire entre 129 et 283. Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites.
+Le mode de répétition est choisi dans l’interface :
+
+- **Nombre fixe** : exécute exactement le nombre indiqué ;
+- **Intervalle** : tire un nombre entre le minimum et le maximum indiqués ;
+- **Continu** : répète la liste jusqu’au clic sur **Arrêter**. La visite en cours se termine proprement avant l’arrêt.
+
+Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites. En mode continu, les 1 000 résultats les plus récents sont conservés afin de borner l’utilisation de la mémoire.
 
 Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les paramètres et les résultats sont temporaires : ils disparaissent lors d’un redémarrage ou d’un redéploiement Render, conformément au choix de stockage éphémère.
 
@@ -108,7 +114,7 @@ Une seule exécution peut fonctionner à la fois. La passerelle, les cibles, les
 L’interface affiche :
 
 - date et source de l’exécution ;
-- numéro de répétition et nombre aléatoire total choisi ;
+- mode d’exécution, numéro de répétition et total choisi lorsqu’il existe ;
 - nom de la passerelle et ouverture de connexion ;
 - URL initiale ;
 - premier libellé et éventuel second libellé du bouton ;
@@ -150,6 +156,10 @@ TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
 # Laissez vide pour un clic unique avec redirection directe.
 SECOND_BUTTON_TEXT="Confirmer"
+EXECUTION_MODE="fixed" # fixed, range ou continuous
+REPETITION_COUNT=10
+REPETITION_MIN=5
+REPETITION_MAX=20
 HEADLESS=false
 ```
 
@@ -171,7 +181,7 @@ python .\main.py
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
 - aucune requête de contrôle IP avant l’ouverture de la cible ;
-- entre 129 et 283 répétitions aléatoires de la liste par lancement ;
+- nombre fixe, intervalle personnalisé ou exécution continue avec arrêt manuel ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 
 ## Tests

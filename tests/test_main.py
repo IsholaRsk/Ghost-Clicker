@@ -386,17 +386,20 @@ class BrowserLifecycleTests(unittest.TestCase):
             main.Target("https://direct.example/page", "Entrer"),
         ]
 
-        with (
-            mock.patch(
-                "playwright.sync_api.sync_playwright", return_value=manager
-            ),
-            mock.patch("main.random.randint", return_value=2) as choose_count,
+        with mock.patch(
+            "playwright.sync_api.sync_playwright", return_value=manager
         ):
-            report = main.run_targets(settings, targets)
+            report = main.run_targets(
+                settings,
+                targets,
+                repetition_count=2,
+                execution_mode="fixed",
+            )
 
-        choose_count.assert_called_once_with(129, 283)
         self.assertTrue(report.success)
         self.assertEqual(report.repetition_count, 2)
+        self.assertEqual(report.completed_repetitions, 2)
+        self.assertEqual(report.completed_visits, 6)
         self.assertEqual(
             [result.repetition for result in report.results],
             [1, 1, 1, 2, 2, 2],
@@ -426,6 +429,83 @@ class BrowserLifecycleTests(unittest.TestCase):
             expected_waits = [500] if target.second_button_text else []
             self.assertEqual(page.coordinate_clicks, expected_coordinates)
             self.assertEqual(page.waits, expected_waits)
+
+
+class RepetitionPlanTests(unittest.TestCase):
+    def test_resolves_fixed_range_and_continuous_modes(self):
+        self.assertEqual(main.resolve_repetition_count("fixed", 12, 2, 8), 12)
+        with mock.patch("main.random.randint", return_value=6) as choose:
+            self.assertEqual(
+                main.resolve_repetition_count("range", 12, 2, 8), 6
+            )
+        choose.assert_called_once_with(2, 8)
+        self.assertIsNone(
+            main.resolve_repetition_count("continuous", 12, 2, 8)
+        )
+
+    def test_rejects_invalid_repetition_plans(self):
+        invalid_plans = [
+            ("unknown", 1, 1, 2),
+            ("fixed", 0, 1, 2),
+            ("range", 1, 5, 2),
+            ("fixed", main.MAX_CONFIGURED_REPETITIONS + 1, 1, 2),
+        ]
+        for plan in invalid_plans:
+            with self.subTest(plan=plan), self.assertRaises(
+                main.ConfigurationError
+            ):
+                main.resolve_repetition_count(*plan)
+
+    def test_continuous_mode_runs_until_stop_is_requested(self):
+        class FakePlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *_args):
+                return None
+
+        stop = {"requested": False}
+
+        def fake_visit(_playwright, _settings, target, repetition):
+            return main.VisitResult(
+                started_at="now",
+                initial_url=target.url,
+                button_text=target.button_text,
+                second_button_text=target.second_button_text,
+                repetition=repetition,
+                success=True,
+            )
+
+        expected_visits = main.MAX_CONTINUOUS_RESULTS + 2
+
+        def update_progress(report):
+            if report.completed_visits == expected_visits:
+                stop["requested"] = True
+
+        with (
+            mock.patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=FakePlaywrightManager(),
+            ),
+            mock.patch("main.visit_target", side_effect=fake_visit),
+        ):
+            report = main.run_targets(
+                make_settings(),
+                [main.Target("https://example.com", "Entrer")],
+                repetition_count=None,
+                execution_mode="continuous",
+                should_stop=lambda: stop["requested"],
+                on_progress=update_progress,
+            )
+
+        self.assertTrue(report.stopped)
+        self.assertTrue(report.success)
+        self.assertEqual(report.execution_mode, "continuous")
+        self.assertIsNone(report.repetition_count)
+        self.assertEqual(report.completed_repetitions, expected_visits)
+        self.assertEqual(report.completed_visits, expected_visits)
+        self.assertEqual(len(report.results), main.MAX_CONTINUOUS_RESULTS)
+        self.assertEqual(report.discarded_results, 2)
 
 
 class TargetResponseTests(unittest.TestCase):
