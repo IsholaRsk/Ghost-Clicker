@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+import main
 import web
 
 
@@ -34,12 +35,18 @@ class WebUploadTests(unittest.TestCase):
         with web.STATE_LOCK:
             web.RUN_STATE.update(
                 running=False,
+                stop_requested=False,
                 source="",
                 started_at="",
                 finished_at="",
                 last_error="",
                 next_run_at="",
+                execution_mode="fixed",
+                planned_repetitions=1,
+                completed_repetitions=0,
+                completed_visits=0,
             )
+        web.STOP_EVENT.clear()
 
     def tearDown(self):
         self.environment.stop()
@@ -52,15 +59,20 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_the_minimalist_console_layout(self):
+    def test_home_uses_the_dark_minimalist_console_layout(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Console d’exécution", content)
         self.assertIn("Passerelle et cibles", content)
-        self.assertIn("--canvas:#f4f4f1", content)
+        self.assertIn("color-scheme:dark", content)
+        self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
+        self.assertIn('value="continuous"', content)
+        self.assertIn("Arrêter", content)
+        self.assertNotIn("129–283", content)
+        self.assertNotIn("--canvas:#f4f4f1", content)
         self.assertNotIn("radial-gradient", content)
 
     def post_file(self, route, field_name, content, filename):
@@ -223,10 +235,134 @@ class WebUploadTests(unittest.TestCase):
             ],
         )
 
-    def test_csv_includes_the_random_repetition_without_ip_check_columns(self):
+    def test_settings_support_a_custom_range_and_continuous_mode(self):
+        target = "https://edited.example/page | Continuer"
+        response = self.client.post(
+            "/settings",
+            data={
+                "csrf_token": web.CSRF_TOKEN,
+                "targets": target,
+                "interval_minutes": "60",
+                "execution_mode": "range",
+                "repetition_count": "7",
+                "repetition_min": "3",
+                "repetition_max": "9",
+            },
+            headers=self.headers,
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        settings = web.load_app_settings()
+        self.assertEqual(settings["execution_mode"], "range")
+        self.assertEqual(settings["repetition_count"], 7)
+        self.assertEqual(settings["repetition_min"], 3)
+        self.assertEqual(settings["repetition_max"], 9)
+
+        response = self.client.post(
+            "/settings",
+            data={
+                "csrf_token": web.CSRF_TOKEN,
+                "targets": target,
+                "interval_minutes": "60",
+                "execution_mode": "continuous",
+                "repetition_count": "7",
+                "repetition_min": "3",
+                "repetition_max": "9",
+            },
+            headers=self.headers,
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(
+            web.load_app_settings()["execution_mode"], "continuous"
+        )
+
+    def test_stop_route_requests_a_clean_job_stop(self):
+        with web.STATE_LOCK:
+            web.RUN_STATE["running"] = True
+
+        response = self.client.post(
+            "/stop",
+            data={"csrf_token": web.CSRF_TOKEN},
+            headers=self.headers,
+            follow_redirects=False,
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertTrue(web.STOP_EVENT.is_set())
+        with web.STATE_LOCK:
+            self.assertTrue(web.RUN_STATE["stop_requested"])
+
+    def test_job_upserts_results_after_each_visit(self):
+        web.save_app_settings(
+            {
+                "targets": [
+                    {
+                        "url": "https://example.com/page",
+                        "button_text": "Entrer",
+                        "second_button_text": "",
+                    }
+                ],
+                "schedule_enabled": False,
+                "interval_minutes": 60,
+                "execution_mode": "fixed",
+                "repetition_count": 2,
+                "repetition_min": 1,
+                "repetition_max": 10,
+            }
+        )
+
+        def fake_run_targets(_settings, targets, **kwargs):
+            report = web.RunReport(
+                started_at="now",
+                execution_mode="fixed",
+                repetition_count=2,
+            )
+            for repetition in (1, 2):
+                report.results.append(
+                    main.VisitResult(
+                        started_at=f"visit-{repetition}",
+                        initial_url=targets[0].url,
+                        button_text=targets[0].button_text,
+                        second_button_text="",
+                        repetition=repetition,
+                        success=True,
+                    )
+                )
+                report.completed_repetitions = repetition
+                report.completed_visits = repetition
+                kwargs["on_progress"](report)
+            report.success = True
+            report.finished_at = "done"
+            return report
+
+        with (
+            mock.patch("web.load_browser_settings", return_value=object()),
+            mock.patch("web.run_targets", side_effect=fake_run_targets),
+            mock.patch("web.upsert_report", wraps=web.upsert_report) as upsert,
+        ):
+            web.execute_job("manuel")
+
+        self.assertEqual(upsert.call_count, 3)
+        snapshots = [call.args[0] for call in upsert.call_args_list]
+        self.assertEqual(
+            [len(snapshot["results"]) for snapshot in snapshots], [1, 2, 2]
+        )
+        self.assertEqual(
+            [snapshot["in_progress"] for snapshot in snapshots],
+            [True, True, False],
+        )
+        reports = web.load_reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(reports[0]["results"]), 2)
+        self.assertFalse(reports[0]["in_progress"])
+
+    def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
         web.append_report(
             {
                 "source": "manuel",
+                "execution_mode": "range",
                 "repetition_count": 200,
                 "results": [
                     {
@@ -247,8 +383,9 @@ class WebUploadTests(unittest.TestCase):
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("mode_execution,repetition", content)
         self.assertIn("repetition,repetitions_planifiees", content)
-        self.assertIn(",7,200,passerelle-rotative,1,", content)
+        self.assertIn(",range,7,200,passerelle-rotative,1,", content)
         self.assertNotIn("ip_sortie", content)
         self.assertNotIn("pays", content)
 
