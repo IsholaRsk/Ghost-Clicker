@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+import main
 import web
 
 
@@ -292,6 +293,70 @@ class WebUploadTests(unittest.TestCase):
         self.assertTrue(web.STOP_EVENT.is_set())
         with web.STATE_LOCK:
             self.assertTrue(web.RUN_STATE["stop_requested"])
+
+    def test_job_upserts_results_after_each_visit(self):
+        web.save_app_settings(
+            {
+                "targets": [
+                    {
+                        "url": "https://example.com/page",
+                        "button_text": "Entrer",
+                        "second_button_text": "",
+                    }
+                ],
+                "schedule_enabled": False,
+                "interval_minutes": 60,
+                "execution_mode": "fixed",
+                "repetition_count": 2,
+                "repetition_min": 1,
+                "repetition_max": 10,
+            }
+        )
+
+        def fake_run_targets(_settings, targets, **kwargs):
+            report = web.RunReport(
+                started_at="now",
+                execution_mode="fixed",
+                repetition_count=2,
+            )
+            for repetition in (1, 2):
+                report.results.append(
+                    main.VisitResult(
+                        started_at=f"visit-{repetition}",
+                        initial_url=targets[0].url,
+                        button_text=targets[0].button_text,
+                        second_button_text="",
+                        repetition=repetition,
+                        success=True,
+                    )
+                )
+                report.completed_repetitions = repetition
+                report.completed_visits = repetition
+                kwargs["on_progress"](report)
+            report.success = True
+            report.finished_at = "done"
+            return report
+
+        with (
+            mock.patch("web.load_browser_settings", return_value=object()),
+            mock.patch("web.run_targets", side_effect=fake_run_targets),
+            mock.patch("web.upsert_report", wraps=web.upsert_report) as upsert,
+        ):
+            web.execute_job("manuel")
+
+        self.assertEqual(upsert.call_count, 3)
+        snapshots = [call.args[0] for call in upsert.call_args_list]
+        self.assertEqual(
+            [len(snapshot["results"]) for snapshot in snapshots], [1, 2, 2]
+        )
+        self.assertEqual(
+            [snapshot["in_progress"] for snapshot in snapshots],
+            [True, True, False],
+        )
+        reports = web.load_reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(len(reports[0]["results"]), 2)
+        self.assertFalse(reports[0]["in_progress"])
 
     def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
         web.append_report(

@@ -40,6 +40,7 @@ APP = Flask(__name__)
 app = APP
 CSRF_TOKEN = secrets.token_urlsafe(32)
 STATE_LOCK = threading.Lock()
+REPORTS_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
 RUN_STATE: dict[str, Any] = {
     "running": False,
@@ -177,7 +178,7 @@ def save_app_settings(value: dict[str, Any]) -> None:
     atomic_write_json(settings_path(), value)
 
 
-def load_reports() -> list[dict[str, Any]]:
+def read_reports_unlocked() -> list[dict[str, Any]]:
     path = reports_path()
     if not path.exists():
         return []
@@ -188,10 +189,33 @@ def load_reports() -> list[dict[str, Any]]:
     return value if isinstance(value, list) else []
 
 
+def load_reports() -> list[dict[str, Any]]:
+    with REPORTS_LOCK:
+        return read_reports_unlocked()
+
+
 def append_report(value: dict[str, Any]) -> None:
-    reports = load_reports()
-    reports.append(value)
-    atomic_write_json(reports_path(), reports[-200:])
+    with REPORTS_LOCK:
+        reports = read_reports_unlocked()
+        reports.append(value)
+        atomic_write_json(reports_path(), reports[-200:])
+
+
+def upsert_report(value: dict[str, Any]) -> None:
+    """Crée ou remplace le rapport d'une exécution en cours."""
+
+    run_id = str(value.get("run_id", "")).strip()
+    if not run_id:
+        raise ValueError("Le rapport progressif doit contenir un run_id.")
+    with REPORTS_LOCK:
+        reports = read_reports_unlocked()
+        for index, report in enumerate(reports):
+            if report.get("run_id") == run_id:
+                reports[index] = value
+                break
+        else:
+            reports.append(value)
+        atomic_write_json(reports_path(), reports[-200:])
 
 
 def targets_from_settings(value: dict[str, Any]) -> list[Target]:
@@ -314,11 +338,24 @@ def execute_job(source: str) -> None:
             int(app_settings["repetition_min"]),
             int(app_settings["repetition_max"]),
         )
+        run_id = secrets.token_urlsafe(12)
         with STATE_LOCK:
             RUN_STATE.update(
                 execution_mode=execution_mode,
                 planned_repetitions=repetition_count,
             )
+
+        def report_value(
+            report: RunReport, *, in_progress: bool
+        ) -> dict[str, Any]:
+            value = report.to_dict()
+            value.update(
+                run_id=run_id,
+                source=source,
+                in_progress=in_progress,
+                updated_at=now_iso(),
+            )
+            return value
 
         def update_progress(report: RunReport) -> None:
             with STATE_LOCK:
@@ -326,6 +363,8 @@ def execute_job(source: str) -> None:
                     completed_repetitions=report.completed_repetitions,
                     completed_visits=report.completed_visits,
                 )
+            # Le CSV et le tableau deviennent disponibles après chaque visite.
+            upsert_report(report_value(report, in_progress=True))
 
         report = run_targets(
             browser_settings,
@@ -335,9 +374,7 @@ def execute_job(source: str) -> None:
             should_stop=STOP_EVENT.is_set,
             on_progress=update_progress,
         )
-        value = report.to_dict()
-        value["source"] = source
-        append_report(value)
+        upsert_report(report_value(report, in_progress=False))
         with STATE_LOCK:
             RUN_STATE["last_error"] = report.error
     except Exception as exc:
@@ -557,8 +594,9 @@ def clear_results() -> Response:
     try:
         require_csrf()
         path = reports_path()
-        if path.exists():
-            path.unlink()
+        with REPORTS_LOCK:
+            if path.exists():
+                path.unlink()
         return redirect(url_for("home", cleared="1"), code=303)
     except ConfigurationError as exc:
         return redirect(url_for("home", error=str(exc)), code=303)
@@ -626,6 +664,9 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
             if report.get("execution_mode") == "continuous" or total is None
             else str(total)
         )
+        source_label = str(report.get("source", ""))
+        if report.get("in_progress"):
+            source_label = f"{source_label} · EN COURS"
         for result in reversed(report.get("results", [])):
             success = bool(result.get("success"))
             css_class = "success" if success else "failure"
@@ -634,7 +675,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                 f"""
                 <tr>
                   <td>{html.escape(str(result.get('started_at', '')))}</td>
-                  <td>{html.escape(str(report.get('source', '')))}</td>
+                  <td>{html.escape(source_label)}</td>
                   <td>{html.escape(str(result.get('repetition', '')))} / {html.escape(total_label)}</td>
                   <td>{html.escape(str(result.get('proxy_name', '')))}</td>
                   <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
@@ -931,7 +972,7 @@ td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-sp
           <a class="button secondary" href="{url_for('download_results')}">Télécharger le CSV</a>
           <form class="inline-form" method="post" action="{url_for('clear_results')}"><input type="hidden" name="csrf_token" value="{CSRF_TOKEN}"><button class="danger" type="submit">Effacer les résultats</button></form>
         </div>
-        <p class="storage-note">Configuration et résultats temporaires : ils disparaissent lors d’un redéploiement. En mode continu, les 1 000 résultats les plus récents sont conservés.</p>
+        <p class="storage-note">Le tableau et le CSV sont mis à jour après chaque visite. Configuration et résultats restent temporaires et disparaissent lors d’un redéploiement. En mode continu, les 1 000 résultats les plus récents sont conservés.</p>
       </div>
     </section>
   </div>

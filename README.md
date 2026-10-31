@@ -122,7 +122,7 @@ L’interface affiche :
 - réussite ou échec ;
 - message d’erreur.
 
-Un bouton permet de télécharger le CSV.
+Le rapport temporaire est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul rapport progressif au lieu de créer des doublons.
 
 ## Navigateur sur Render
 
