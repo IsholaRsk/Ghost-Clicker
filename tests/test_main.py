@@ -279,6 +279,8 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.page.screen_text = self.changed_name
                 if self.name == "Entrer":
                     self.page.url += "/redirected"
+                if self.name == "Ouvrir":
+                    self.page.context.open_popup()
 
         class FakeMouse:
             def __init__(self, page):
@@ -290,11 +292,13 @@ class BrowserLifecycleTests(unittest.TestCase):
                 self.page.url += "/redirected"
 
         class FakePage:
-            def __init__(self):
+            def __init__(self, context):
+                self.context = context
                 self.changed_labels = {
                     "Continuer": "Continue in source language",
                     "Valider": "Finish in source language",
                     "Entrer": "Direct redirect",
+                    "Ouvrir": "Popup destination",
                 }
                 self.url = "about:blank"
                 self.clicked_labels = []
@@ -333,7 +337,9 @@ class BrowserLifecycleTests(unittest.TestCase):
 
         class FakeContext:
             def __init__(self):
-                self.page = FakePage()
+                self.page_handler = None
+                self.popup = None
+                self.page = FakePage(self)
                 self.closed = False
 
             def set_default_navigation_timeout(self, _timeout):
@@ -341,6 +347,20 @@ class BrowserLifecycleTests(unittest.TestCase):
 
             def new_page(self):
                 return self.page
+
+            def on(self, event, callback):
+                if event == "page":
+                    self.page_handler = callback
+
+            def remove_listener(self, event, callback):
+                if event == "page" and self.page_handler == callback:
+                    self.page_handler = None
+
+            def open_popup(self):
+                self.popup = FakePage(self)
+                self.popup.url = "https://popup.example/destination"
+                if self.page_handler is not None:
+                    self.page_handler(self.popup)
 
             def close(self):
                 self.closed = True
@@ -384,6 +404,7 @@ class BrowserLifecycleTests(unittest.TestCase):
             main.Target("https://one.example/page", "Continuer", "Confirmer"),
             main.Target("https://two.example/page", "Valider", "Terminer"),
             main.Target("https://direct.example/page", "Entrer"),
+            main.Target("https://popup-source.example/page", "Ouvrir"),
         ]
 
         with mock.patch(
@@ -399,16 +420,16 @@ class BrowserLifecycleTests(unittest.TestCase):
         self.assertTrue(report.success)
         self.assertEqual(report.repetition_count, 2)
         self.assertEqual(report.completed_repetitions, 2)
-        self.assertEqual(report.completed_visits, 6)
+        self.assertEqual(report.completed_visits, 8)
         self.assertEqual(
             [result.repetition for result in report.results],
-            [1, 1, 1, 2, 2, 2],
+            [1, 1, 1, 1, 2, 2, 2, 2],
         )
-        self.assertEqual(len(chromium.browsers), 6)
+        self.assertEqual(len(chromium.browsers), 8)
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
         expected_targets = targets * 2
-        for browser, target in zip(
-            chromium.browsers, expected_targets, strict=True
+        for browser, target, result in zip(
+            chromium.browsers, expected_targets, report.results, strict=True
         ):
             self.assertEqual(len(browser.contexts), 1)
             self.assertTrue(browser.contexts[0].closed)
@@ -429,6 +450,12 @@ class BrowserLifecycleTests(unittest.TestCase):
             expected_waits = [500] if target.second_button_text else []
             self.assertEqual(page.coordinate_clicks, expected_coordinates)
             self.assertEqual(page.waits, expected_waits)
+            expected_final_url = (
+                "https://popup.example/destination"
+                if target.button_text == "Ouvrir"
+                else f"{target.url}/redirected"
+            )
+            self.assertEqual(result.final_url, expected_final_url)
 
 
 class RepetitionPlanTests(unittest.TestCase):
@@ -494,6 +521,9 @@ class RepetitionPlanTests(unittest.TestCase):
                 [main.Target("https://example.com", "Entrer")],
                 repetition_count=None,
                 execution_mode="continuous",
+                continuous_minimum=1,
+                continuous_maximum=10,
+                continuous_window_seconds=0,
                 should_stop=lambda: stop["requested"],
                 on_progress=update_progress,
             )
@@ -506,6 +536,66 @@ class RepetitionPlanTests(unittest.TestCase):
         self.assertEqual(report.completed_visits, expected_visits)
         self.assertEqual(len(report.results), main.MAX_CONTINUOUS_RESULTS)
         self.assertEqual(report.discarded_results, 2)
+
+    def test_continuous_mode_selects_a_new_count_every_five_minutes(self):
+        class FakePlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *_args):
+                return None
+
+        stop = {"requested": False}
+        window_waits = []
+
+        def fake_visit(_playwright, _settings, target, repetition):
+            return main.VisitResult(
+                started_at="now",
+                initial_url=target.url,
+                button_text=target.button_text,
+                second_button_text="",
+                repetition=repetition,
+                success=True,
+            )
+
+        def update_progress(report):
+            if report.completed_visits == 5:
+                stop["requested"] = True
+
+        def fake_wait(seconds, should_stop):
+            window_waits.append(seconds)
+            return bool(should_stop and should_stop())
+
+        with (
+            mock.patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=FakePlaywrightManager(),
+            ),
+            mock.patch("main.visit_target", side_effect=fake_visit),
+            mock.patch("main.random.randint", side_effect=[2, 3]) as choose,
+            mock.patch(
+                "main.wait_with_cancellation", side_effect=fake_wait
+            ),
+        ):
+            report = main.run_targets(
+                make_settings(),
+                [main.Target("https://example.com", "Entrer")],
+                repetition_count=None,
+                execution_mode="continuous",
+                continuous_minimum=2,
+                continuous_maximum=4,
+                continuous_window_seconds=main.CONTINUOUS_WINDOW_SECONDS,
+                should_stop=lambda: stop["requested"],
+                on_progress=update_progress,
+            )
+
+        self.assertTrue(report.stopped)
+        self.assertEqual(report.completed_visits, 5)
+        self.assertEqual(report.continuous_window, 2)
+        self.assertEqual(report.window_repetition_count, 3)
+        self.assertEqual(choose.call_args_list, [mock.call(2, 4), mock.call(2, 4)])
+        self.assertEqual(len(window_waits), 2)
+        self.assertTrue(all(0 < wait <= 300 for wait in window_waits))
 
 
 class TargetResponseTests(unittest.TestCase):

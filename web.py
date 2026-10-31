@@ -54,6 +54,8 @@ RUN_STATE: dict[str, Any] = {
     "planned_repetitions": 1,
     "completed_repetitions": 0,
     "completed_visits": 0,
+    "continuous_window": 0,
+    "window_repetition_count": 0,
 }
 
 DEFAULT_APP_SETTINGS: dict[str, Any] = {
@@ -362,6 +364,8 @@ def execute_job(source: str) -> None:
                 RUN_STATE.update(
                     completed_repetitions=report.completed_repetitions,
                     completed_visits=report.completed_visits,
+                    continuous_window=report.continuous_window,
+                    window_repetition_count=report.window_repetition_count,
                 )
             # Le CSV et le tableau deviennent disponibles après chaque visite.
             upsert_report(report_value(report, in_progress=True))
@@ -371,6 +375,8 @@ def execute_job(source: str) -> None:
             targets,
             repetition_count=repetition_count,
             execution_mode=execution_mode,
+            continuous_minimum=int(app_settings["repetition_min"]),
+            continuous_maximum=int(app_settings["repetition_max"]),
             should_stop=STOP_EVENT.is_set,
             on_progress=update_progress,
         )
@@ -404,6 +410,8 @@ def start_job(source: str) -> bool:
             planned_repetitions=1,
             completed_repetitions=0,
             completed_visits=0,
+            continuous_window=0,
+            window_repetition_count=0,
         )
     thread = threading.Thread(target=execute_job, args=(source,), daemon=True)
     thread.start()
@@ -613,6 +621,8 @@ def download_results() -> Response:
             "mode_execution",
             "repetition",
             "repetitions_planifiees",
+            "cycle_continu",
+            "repetitions_du_cycle",
             "proxy",
             "connexions_proxy",
             "url_initiale",
@@ -635,6 +645,8 @@ def download_results() -> Response:
                     report.get("execution_mode", "fixed"),
                     result.get("repetition", ""),
                     report.get("repetition_count", ""),
+                    result.get("continuous_window", ""),
+                    result.get("window_repetition_count", ""),
                     result.get("proxy_name", ""),
                     result.get("proxy_attempts", ""),
                     result.get("initial_url", ""),
@@ -668,6 +680,11 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
         if report.get("in_progress"):
             source_label = f"{source_label} · EN COURS"
         for result in reversed(report.get("results", [])):
+            result_total_label = total_label
+            if report.get("execution_mode") == "continuous":
+                window = result.get("continuous_window", "")
+                window_count = result.get("window_repetition_count", "")
+                result_total_label = f"cycle {window} · {window_count} prévues"
             success = bool(result.get("success"))
             css_class = "success" if success else "failure"
             label = "SUCCÈS" if success else "ÉCHEC"
@@ -676,7 +693,7 @@ def render_result_rows(reports: list[dict[str, Any]]) -> str:
                 <tr>
                   <td>{html.escape(str(result.get('started_at', '')))}</td>
                   <td>{html.escape(source_label)}</td>
-                  <td>{html.escape(str(result.get('repetition', '')))} / {html.escape(total_label)}</td>
+                  <td>{html.escape(str(result.get('repetition', '')))} / {html.escape(result_total_label)}</td>
                   <td>{html.escape(str(result.get('proxy_name', '')))}</td>
                   <td class="url">{html.escape(str(result.get('initial_url', '')))}</td>
                   <td>{html.escape(str(result.get('button_text', '')))}</td>
@@ -726,7 +743,15 @@ def home() -> str:
             "Arrêt demandé" if state["stop_requested"] else "Exécution en cours"
         )
         planned = state.get("planned_repetitions")
-        plan_label = "continu" if planned is None else f"{planned} répétition(s)"
+        if planned is None and state.get("continuous_window"):
+            plan_label = (
+                f"cycle {state['continuous_window']} · "
+                f"{state['window_repetition_count']} répétition(s) / 5 min"
+            )
+        else:
+            plan_label = (
+                "continu" if planned is None else f"{planned} répétition(s)"
+            )
         status = (
             f"{status_prefix} · {state['completed_visits']} visite(s) · "
             f"{plan_label}"
@@ -756,7 +781,10 @@ def home() -> str:
     range_checked = " checked" if execution_mode == "range" else ""
     continuous_checked = " checked" if execution_mode == "continuous" else ""
     if execution_mode == "continuous":
-        execution_summary = "Mode continu, jusqu'à l'arrêt manuel"
+        execution_summary = (
+            f"Mode continu : {repetition_min} à {repetition_max} "
+            "répétitions tirées toutes les 5 minutes"
+        )
     elif execution_mode == "range":
         execution_summary = (
             f"Intervalle de {repetition_min} à {repetition_max} répétitions"
@@ -888,7 +916,7 @@ td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-sp
     </div>
     <div class="hero-facts" aria-label="Règles d’exécution">
       <span class="fact">Nombre fixe ou intervalle</span>
-      <span class="fact">Mode continu avec arrêt</span>
+      <span class="fact">Cycles continus de 5 min</span>
       <span class="fact">1 ou 2 clics / visite</span>
     </div>
   </section>
@@ -942,7 +970,7 @@ td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-sp
           <div class="mode-options">
             <label class="mode-option"><input type="radio" name="execution_mode" value="fixed"{fixed_checked}><span>Nombre fixe<small>Utilise exactement la valeur choisie.</small></span></label>
             <label class="mode-option"><input type="radio" name="execution_mode" value="range"{range_checked}><span>Intervalle<small>Tire un total entre le minimum et le maximum.</small></span></label>
-            <label class="mode-option"><input type="radio" name="execution_mode" value="continuous"{continuous_checked}><span>Continu<small>Fonctionne jusqu'au clic sur Arrêter.</small></span></label>
+            <label class="mode-option"><input type="radio" name="execution_mode" value="continuous"{continuous_checked}><span>Continu<small>Tire une valeur min/max par cycle de 5 min, jusqu'à Arrêter.</small></span></label>
           </div>
           <div class="repeat-fields">
             <div><label for="repetition_count">Nombre fixe</label><input id="repetition_count" type="number" name="repetition_count" min="1" max="{MAX_CONFIGURED_REPETITIONS}" value="{repetition_count}"></div>

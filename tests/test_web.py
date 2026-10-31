@@ -45,6 +45,8 @@ class WebUploadTests(unittest.TestCase):
                 planned_repetitions=1,
                 completed_repetitions=0,
                 completed_visits=0,
+                continuous_window=0,
+                window_repetition_count=0,
             )
         web.STOP_EVENT.clear()
 
@@ -70,6 +72,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
         self.assertIn('value="continuous"', content)
+        self.assertIn("cycle de 5 min", content)
         self.assertIn("Arrêter", content)
         self.assertNotIn("129–283", content)
         self.assertNotIn("--canvas:#f4f4f1", content)
@@ -385,7 +388,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("mode_execution,repetition", content)
         self.assertIn("repetition,repetitions_planifiees", content)
-        self.assertIn(",range,7,200,passerelle-rotative,1,", content)
+        self.assertIn(
+            ",range,7,200,,,passerelle-rotative,1,", content
+        )
         self.assertNotIn("ip_sortie", content)
         self.assertNotIn("pays", content)
 

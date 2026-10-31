@@ -20,6 +20,7 @@ DEFAULT_PROXY_GATEWAY_FILE = "/tmp/ghost-clicker-proxy-gateway.txt"
 EXECUTION_MODES = frozenset({"fixed", "range", "continuous"})
 MAX_CONFIGURED_REPETITIONS = 10_000
 MAX_CONTINUOUS_RESULTS = 1_000
+CONTINUOUS_WINDOW_SECONDS = 5 * 60
 
 
 class ConfigurationError(ValueError):
@@ -66,6 +67,8 @@ class VisitResult:
     button_text: str
     second_button_text: str
     repetition: int = 0
+    continuous_window: int = 0
+    window_repetition_count: int = 0
     proxy_name: str = ""
     proxy_attempts: int = 0
     final_url: str = ""
@@ -84,6 +87,8 @@ class RunReport:
     completed_repetitions: int = 0
     completed_visits: int = 0
     failed_visits: int = 0
+    continuous_window: int = 0
+    window_repetition_count: int = 0
     stopped: bool = False
     discarded_results: int = 0
     finished_at: str = ""
@@ -403,18 +408,57 @@ def install_request_guard(page: Any) -> None:
     page.route("**/*", handle)
 
 
-def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
+def page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""
+
+
+def wait_for_navigation_outcome(
+    page: Any,
+    previous_url: str,
+    opened_pages: Sequence[Any],
+    timeout_ms: int,
+) -> Any:
+    """Attend une redirection de l'onglet courant ou un nouvel onglet."""
+
     deadline = time.monotonic() + (timeout_ms / 1_000)
-    while page.url == previous_url:
+    destination = None
+    while destination is None:
+        current_url = page_url(page)
+        if current_url and current_url != previous_url:
+            destination = page
+            break
+        for candidate in opened_pages:
+            candidate_url = page_url(candidate)
+            if candidate_url and candidate_url != "about:blank":
+                destination = candidate
+                break
+        if destination is not None:
+            break
         if time.monotonic() >= deadline:
-            raise TimeoutError("Le clic n'a déclenché aucune redirection.")
-        page.wait_for_timeout(250)
+            raise TimeoutError(
+                "Le clic n'a déclenché ni redirection ni nouvel onglet."
+            )
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            time.sleep(0.25)
+
     remaining_ms = max(1_000, int((deadline - time.monotonic()) * 1_000))
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=remaining_ms)
+        destination.wait_for_load_state("domcontentloaded", timeout=remaining_ms)
     except Exception:
-        # L'URL a déjà changé : un site SPA peut ne pas produire de nouvel événement DOM.
+        # La destination est déjà connue : une SPA peut ne pas émettre cet événement.
         pass
+    return destination
+
+
+def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
+    """Compatibilité : attend uniquement la redirection de la page courante."""
+
+    wait_for_navigation_outcome(page, previous_url, [], timeout_ms)
 
 
 def require_successful_target_response(response: Any) -> None:
@@ -462,11 +506,19 @@ def visit_target(
     page = None
     navigation_status: dict[str, int | None] = {"value": None}
     record_navigation_handler: Any | None = None
+    new_page_handler: Any | None = None
+    opened_pages: list[Any] = []
 
     try:
         browser = playwright.chromium.launch(headless=settings.headless)
         context, page = open_proxy_context(browser, settings, result)
         install_request_guard(page)
+
+        def record_new_page(new_page: Any) -> None:
+            if new_page is not page:
+                opened_pages.append(new_page)
+
+        new_page_handler = record_new_page
 
         def record_navigation(
             response: Any,
@@ -502,20 +554,33 @@ def visit_target(
         click_y = box["y"] + (box["height"] / 2)
         previous_url = page.url
         navigation_status["value"] = None
+        context.on("page", new_page_handler)
         first_click_target.click(timeout=settings.click_timeout_ms)
 
         if target.second_button_text:
             page.wait_for_timeout(500)
-            page.mouse.click(click_x, click_y)
+            popup_already_open = any(
+                page_url(candidate) not in {"", "about:blank"}
+                for candidate in opened_pages
+            )
+            if page_url(page) == previous_url and not popup_already_open:
+                page.mouse.click(click_x, click_y)
 
-        wait_for_redirect(page, previous_url, settings.redirect_timeout_ms)
+        destination_page = wait_for_navigation_outcome(
+            page,
+            previous_url,
+            opened_pages,
+            settings.redirect_timeout_ms,
+        )
 
         if settings.wait_after_redirect_seconds:
-            page.wait_for_timeout(
+            destination_page.wait_for_timeout(
                 int(settings.wait_after_redirect_seconds * 1_000)
             )
-        result.final_url = page.url
-        result.final_status = navigation_status["value"]
+        result.final_url = page_url(destination_page)
+        result.final_status = (
+            navigation_status["value"] if destination_page is page else None
+        )
         result.success = True
     except Exception as exc:
         result.final_url = page.url if page is not None else ""
@@ -524,6 +589,11 @@ def visit_target(
         if page is not None and record_navigation_handler is not None:
             try:
                 page.remove_listener("response", record_navigation_handler)
+            except Exception:
+                pass
+        if context is not None and new_page_handler is not None:
+            try:
+                context.remove_listener("page", new_page_handler)
             except Exception:
                 pass
         if context is not None:
@@ -561,6 +631,9 @@ def run_targets(
     targets: Sequence[Target],
     repetition_count: int | None = 1,
     execution_mode: str = "fixed",
+    continuous_minimum: int = 1,
+    continuous_maximum: int = 10,
+    continuous_window_seconds: float = CONTINUOUS_WINDOW_SECONDS,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[RunReport], None] | None = None,
 ) -> RunReport:
@@ -573,6 +646,17 @@ def run_targets(
             "Le nombre de répétitions doit être compris entre 1 et "
             f"{MAX_CONFIGURED_REPETITIONS}."
         )
+    if not (
+        1 <= continuous_minimum <= continuous_maximum
+        <= MAX_CONFIGURED_REPETITIONS
+    ):
+        raise ConfigurationError(
+            "L'intervalle continu doit être compris entre 1 et "
+            f"{MAX_CONFIGURED_REPETITIONS}, avec un minimum inférieur "
+            "ou égal au maximum."
+        )
+    if continuous_window_seconds < 0:
+        raise ConfigurationError("La durée d'une fenêtre continue est invalide.")
 
     try:
         from playwright.sync_api import sync_playwright
@@ -603,12 +687,27 @@ def run_targets(
     with sync_playwright() as playwright:
         try:
             repetition = 0
+            window_repetitions_remaining = 0
+            window_deadline = 0.0
             while continuous or repetition < (repetition_count or 0):
                 if stop_requested():
                     report.stopped = True
                     break
-                repetition += 1
 
+                if continuous and window_repetitions_remaining == 0:
+                    report.continuous_window += 1
+                    report.window_repetition_count = random.randint(
+                        continuous_minimum, continuous_maximum
+                    )
+                    window_repetitions_remaining = (
+                        report.window_repetition_count
+                    )
+                    window_deadline = (
+                        time.monotonic() + continuous_window_seconds
+                    )
+                    notify_progress()
+
+                repetition += 1
                 for target_index, target in enumerate(targets):
                     if stop_requested():
                         report.stopped = True
@@ -617,6 +716,11 @@ def run_targets(
                     result = visit_target(
                         playwright, settings, target, repetition
                     )
+                    if continuous:
+                        result.continuous_window = report.continuous_window
+                        result.window_repetition_count = (
+                            report.window_repetition_count
+                        )
                     report.results.append(result)
                     report.completed_visits += 1
                     if not result.success:
@@ -645,6 +749,19 @@ def run_targets(
 
                 if report.stopped:
                     break
+
+                if continuous:
+                    window_repetitions_remaining -= 1
+                    if window_repetitions_remaining == 0:
+                        remaining_window_seconds = max(
+                            0.0, window_deadline - time.monotonic()
+                        )
+                        if remaining_window_seconds and wait_with_cancellation(
+                            remaining_window_seconds,
+                            should_stop,
+                        ):
+                            report.stopped = True
+                            break
 
             completed_plan = continuous or (
                 report.completed_repetitions == repetition_count
@@ -677,23 +794,28 @@ def main() -> int:
             ),
         )
         execution_mode = os.getenv("EXECUTION_MODE", "fixed").strip().lower()
+        fixed_count = parse_positive_int(
+            os.getenv("REPETITION_COUNT"), 1, "REPETITION_COUNT"
+        )
+        repetition_minimum = parse_positive_int(
+            os.getenv("REPETITION_MIN"), 1, "REPETITION_MIN"
+        )
+        repetition_maximum = parse_positive_int(
+            os.getenv("REPETITION_MAX"), 10, "REPETITION_MAX"
+        )
         repetition_count = resolve_repetition_count(
             execution_mode,
-            parse_positive_int(
-                os.getenv("REPETITION_COUNT"), 1, "REPETITION_COUNT"
-            ),
-            parse_positive_int(
-                os.getenv("REPETITION_MIN"), 1, "REPETITION_MIN"
-            ),
-            parse_positive_int(
-                os.getenv("REPETITION_MAX"), 10, "REPETITION_MAX"
-            ),
+            fixed_count,
+            repetition_minimum,
+            repetition_maximum,
         )
         report = run_targets(
             settings,
             [target],
             repetition_count=repetition_count,
             execution_mode=execution_mode,
+            continuous_minimum=repetition_minimum,
+            continuous_maximum=repetition_maximum,
         )
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
         return 0 if report.success else 1

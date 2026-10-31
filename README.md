@@ -6,8 +6,8 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Chaque lancement u
 2. ouvre immédiatement la page cible dans Chromium headless ;
 3. repère le premier libellé visible exact et mémorise sa position dans le bouton ;
 4. clique une première fois ;
-5. si aucun second libellé n’est configuré, attend immédiatement la redirection ;
-6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis attend la redirection ;
+5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
+6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
 7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
 8. ferme complètement Chromium avant la visite suivante.
 
@@ -66,7 +66,7 @@ https://site-autorise.example/page | Continuer
 https://site-autorise.example/page | Continuer | Confirmer
 ```
 
-Avec deux champs, le bot clique une fois puis attend immédiatement la redirection. Avec trois champs, il clique deux fois au même emplacement, avec une pause de 500 ms entre les clics. Le second libellé sert à sélectionner le mode à deux clics et reste une valeur de référence : il n’est pas recherché dans la page.
+Avec deux champs, le bot clique une fois puis attend immédiatement la navigation. Avec trois champs, il clique deux fois au même emplacement, avec une pause de 500 ms entre les clics. Dans les deux cas, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sert à sélectionner le mode à deux clics et reste une valeur de référence : il n’est pas recherché dans la page.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -103,7 +103,7 @@ Le mode de répétition est choisi dans l’interface :
 
 - **Nombre fixe** : exécute exactement le nombre indiqué ;
 - **Intervalle** : tire un nombre entre le minimum et le maximum indiqués ;
-- **Continu** : répète la liste jusqu’au clic sur **Arrêter**. La visite en cours se termine proprement avant l’arrêt.
+- **Continu** : fonctionne par cycles successifs de 5 minutes. Au début de chaque cycle, un nouveau nombre de répétitions est tiré entre le minimum et le maximum configurés. Le bot continue jusqu’au clic sur **Arrêter** et termine proprement la visite en cours.
 
 Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites. En mode continu, les 1 000 résultats les plus récents sont conservés afin de borner l’utilisation de la mémoire.
 
