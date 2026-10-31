@@ -567,16 +567,16 @@ def home() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>Ghost Clicker — Console</title>
 <style>
-:root{{--canvas:#f4f4f1;--surface:#ffffff;--surface-soft:#fafaf8;--ink:#181817;--muted:#6f706b;--line:#deded8;--line-strong:#c9c9c1;--accent:#222220;--success:#24734a;--success-soft:#edf7f1;--warning:#9a6700;--warning-soft:#fff8e6;--danger:#b42318;--danger-soft:#fff3f2;--focus:#7c8da5}}
+:root{{color-scheme:dark;--canvas:#0d0f12;--surface:#15181c;--surface-soft:#1a1e23;--ink:#f2f4f7;--muted:#9ba3ad;--line:#292e35;--line-strong:#3c434d;--accent:#f2f4f7;--success:#58c68a;--success-soft:#14271d;--warning:#f0b84b;--warning-soft:#2a2212;--danger:#ff8b81;--danger-soft:#2b1818;--focus:#7e9cc8}}
 *{{box-sizing:border-box}}
 html{{background:var(--canvas)}}
 body{{margin:0;min-height:100vh;background:var(--canvas);color:var(--ink);font:14px/1.55 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}}
 a{{color:inherit}}
 .shell{{width:min(1160px,calc(100% - 40px));margin:0 auto}}
-.topbar{{background:rgba(255,255,255,.94);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;backdrop-filter:blur(10px)}}
+.topbar{{background:rgba(13,15,18,.92);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;backdrop-filter:blur(10px)}}
 .topbar-inner{{height:64px;display:flex;align-items:center;justify-content:space-between;gap:24px}}
 .brand{{display:inline-flex;align-items:center;gap:11px;text-decoration:none;font-size:15px;font-weight:680;letter-spacing:-.01em}}
-.brand-mark{{width:28px;height:28px;display:grid;place-items:center;background:var(--ink);color:#fff;border-radius:7px;font-size:12px;font-weight:800}}
+.brand-mark{{width:28px;height:28px;display:grid;place-items:center;background:var(--ink);color:var(--canvas);border-radius:7px;font-size:12px;font-weight:800}}
 .topbar-note{{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}}
 .service-dot{{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 0 3px var(--success-soft)}}
 main{{padding:52px 0 64px}}
@@ -589,7 +589,7 @@ h2{{margin-bottom:0;font-size:18px;line-height:1.3;letter-spacing:-.02em;font-we
 .hero-facts{{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:330px}}
 .fact{{border:1px solid var(--line);background:var(--surface);padding:7px 10px;border-radius:999px;color:var(--muted);font-size:11px;white-space:nowrap}}
 .notices{{display:grid;gap:8px;margin-bottom:18px}}
-.notice{{padding:11px 13px;border:1px solid #d8e1ea;border-left:3px solid #60758d;border-radius:8px;background:#f6f8fa;color:#364759}}
+.notice{{padding:11px 13px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:8px;background:#151d27;color:#c6d2df}}
 .status-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}}
 .stat{{min-width:0;padding:16px 18px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}}
 .stat-label{{display:block;margin-bottom:8px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}}
@@ -597,7 +597,7 @@ h2{{margin-bottom:0;font-size:18px;line-height:1.3;letter-spacing:-.02em;font-we
 .stat-value time{{overflow:hidden;text-overflow:ellipsis}}
 .status-dot{{width:8px;height:8px;flex:0 0 auto;border-radius:50%}}
 .status-dot.idle,.status-dot.ready{{background:var(--success)}}
-.status-dot.running{{background:#4d6fa8;animation:pulse 1.7s ease-in-out infinite}}
+.status-dot.running{{background:#7da6e3;animation:pulse 1.7s ease-in-out infinite}}
 .status-dot.warning{{background:var(--warning)}}
 @keyframes pulse{{50%{{opacity:.38}}}}
 .panel{{margin-bottom:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}}
@@ -611,24 +611,24 @@ h2{{margin-bottom:0;font-size:18px;line-height:1.3;letter-spacing:-.02em;font-we
 .form-block{{padding:16px;border:1px solid var(--line);border-radius:9px;background:var(--surface-soft)}}
 .form-title{{margin:0 0 3px;font-size:13px;font-weight:680}}
 .form-hint{{margin:0 0 13px;color:var(--muted);font-size:12px}}
-label{{display:block;margin:14px 0 6px;color:#3f403d;font-size:12px;font-weight:650}}
+label{{display:block;margin:14px 0 6px;color:#c9ced6;font-size:12px;font-weight:650}}
 .form-block label:first-of-type{{margin-top:0}}
 textarea,input[type=number],input[type=file],input[type=password]{{width:100%;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);color:var(--ink);padding:10px 11px;font:inherit;outline:none;transition:border-color .15s,box-shadow .15s}}
 textarea{{min-height:190px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;line-height:1.6}}
-input:focus,textarea:focus{{border-color:var(--focus);box-shadow:0 0 0 3px rgba(124,141,165,.16)}}
+input:focus,textarea:focus{{border-color:var(--focus);box-shadow:0 0 0 3px rgba(126,156,200,.18)}}
 input[type=file]{{padding:6px}}
-input[type=file]::file-selector-button{{margin-right:10px;border:0;border-radius:5px;background:#ecece8;color:var(--ink);padding:7px 9px;font:inherit;font-size:12px;cursor:pointer}}
+input[type=file]::file-selector-button{{margin-right:10px;border:0;border-radius:5px;background:#252a31;color:var(--ink);padding:7px 9px;font:inherit;font-size:12px;cursor:pointer}}
 .toggle-row{{display:flex;align-items:center;gap:9px;margin-top:15px;font-size:13px;font-weight:550}}
 .toggle-row input{{width:16px;height:16px;margin:0;accent-color:var(--ink)}}
-button,a.button{{display:inline-flex;align-items:center;justify-content:center;min-height:38px;margin:14px 7px 0 0;border:1px solid var(--ink);border-radius:7px;padding:8px 13px;background:var(--ink);color:#fff;font:inherit;font-size:12px;font-weight:680;text-decoration:none;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}}
-button:hover,a.button:hover{{background:#383836;border-color:#383836}}
+button,a.button{{display:inline-flex;align-items:center;justify-content:center;min-height:38px;margin:14px 7px 0 0;border:1px solid var(--ink);border-radius:7px;padding:8px 13px;background:var(--ink);color:var(--canvas);font:inherit;font-size:12px;font-weight:680;text-decoration:none;cursor:pointer;transition:background .15s,border-color .15s,transform .15s}}
+button:hover,a.button:hover{{background:#d9dde2;border-color:#d9dde2}}
 button:active,a.button:active{{transform:translateY(1px)}}
-button:focus-visible,a.button:focus-visible{{outline:3px solid rgba(124,141,165,.3);outline-offset:2px}}
+button:focus-visible,a.button:focus-visible{{outline:3px solid rgba(126,156,200,.32);outline-offset:2px}}
 button:disabled{{opacity:.42;cursor:not-allowed;transform:none}}
 a.button.secondary,button.secondary{{border-color:var(--line-strong);background:var(--surface);color:var(--ink)}}
-a.button.secondary:hover,button.secondary:hover{{border-color:#9d9d96;background:var(--surface-soft)}}
-button.danger{{border-color:#e7c3bf;background:var(--surface);color:var(--danger)}}
-button.danger:hover{{border-color:#d89e98;background:var(--danger-soft)}}
+a.button.secondary:hover,button.secondary:hover{{border-color:#626b77;background:var(--surface-soft)}}
+button.danger{{border-color:#693b3a;background:var(--surface);color:var(--danger)}}
+button.danger:hover{{border-color:#9f504b;background:var(--danger-soft)}}
 .inline-form{{display:inline}}
 .run-copy{{margin:0 0 18px;color:var(--muted)}}
 .run-specs{{margin:0;border-top:1px solid var(--line)}}
@@ -642,7 +642,7 @@ table{{width:100%;min-width:1120px;border-collapse:collapse}}
 th,td{{padding:11px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}
 th{{position:sticky;top:0;background:var(--surface-soft);color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.07em;text-transform:uppercase}}
 tbody tr:last-child td{{border-bottom:0}}
-tbody tr:hover{{background:#fafaf8}}
+tbody tr:hover{{background:#191d22}}
 td{{font-size:12px}}
 td.url,td.error{{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .badge{{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.04em}}

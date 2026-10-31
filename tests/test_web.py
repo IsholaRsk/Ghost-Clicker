@@ -52,15 +52,17 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_the_minimalist_console_layout(self):
+    def test_home_uses_the_dark_minimalist_console_layout(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Console d’exécution", content)
         self.assertIn("Passerelle et cibles", content)
-        self.assertIn("--canvas:#f4f4f1", content)
+        self.assertIn("color-scheme:dark", content)
+        self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
+        self.assertNotIn("--canvas:#f4f4f1", content)
         self.assertNotIn("radial-gradient", content)
 
     def post_file(self, route, field_name, content, filename):
