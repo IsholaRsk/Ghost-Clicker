@@ -247,7 +247,9 @@ class SupabaseStorage:
         all_visits: bool,
     ) -> list[dict[str, Any]]:
         page_size = 1_000
-        maximum = None if all_visits else 5_000
+        # La console ne charge que les 500 visites les plus récentes pour que
+        # le rafraîchissement JSON reste léger. L'export CSV utilise all_visits.
+        maximum = None if all_visits else 500
         visits: list[dict[str, Any]] = []
         for chunk_start in range(0, len(run_ids), 50):
             chunk = run_ids[chunk_start : chunk_start + 50]
@@ -293,7 +295,9 @@ class SupabaseStorage:
                 visit_number = int(row.get("visit_number", 0))
             except (TypeError, ValueError):
                 continue
-            visits_by_run.setdefault(run_id, []).append((visit_number, payload))
+            result = dict(payload)
+            result["visit_number"] = visit_number
+            visits_by_run.setdefault(run_id, []).append((visit_number, result))
 
         reports: list[dict[str, Any]] = []
         for row in reversed(rows):
@@ -311,6 +315,32 @@ class SupabaseStorage:
             ]
             reports.append(report)
         return reports
+
+    def delete_results(
+        self,
+        *,
+        visits: list[dict[str, Any]] | None = None,
+        run_ids: list[str] | None = None,
+    ) -> dict[str, int]:
+        value = self._request(
+            "POST",
+            "rpc/ghost_clicker_delete_results",
+            body={
+                "p_visits": visits or [],
+                "p_run_ids": run_ids or [],
+            },
+        )
+        if not isinstance(value, dict):
+            raise StorageError("Supabase a renvoyé un bilan de suppression invalide.")
+        try:
+            return {
+                "visits": int(value.get("deleted_visits", 0)),
+                "runs": int(value.get("deleted_runs", 0)),
+            }
+        except (TypeError, ValueError) as exc:
+            raise StorageError(
+                "Supabase a renvoyé un bilan de suppression invalide."
+            ) from exc
 
     def clear_reports(self) -> None:
         self._request("POST", "rpc/ghost_clicker_clear_reports", body={})

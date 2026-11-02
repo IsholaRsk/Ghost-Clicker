@@ -58,6 +58,8 @@ class Target:
     url: str
     button_text: str
     second_button_text: str = ""
+    target_id: str = ""
+    alias: str = ""
 
 
 @dataclass
@@ -66,6 +68,8 @@ class VisitResult:
     initial_url: str
     button_text: str
     second_button_text: str
+    target_id: str = ""
+    target_alias: str = ""
     repetition: int = 0
     continuous_window: int = 0
     window_repetition_count: int = 0
@@ -499,6 +503,8 @@ def visit_target(
         initial_url=target.url,
         button_text=target.button_text,
         second_button_text=target.second_button_text,
+        target_id=target.target_id,
+        target_alias=target.alias,
         repetition=repetition,
     )
     browser = None

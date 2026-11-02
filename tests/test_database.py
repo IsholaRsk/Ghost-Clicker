@@ -150,7 +150,37 @@ class SupabaseStorageTests(unittest.TestCase):
             [item["repetition"] for item in reports[1]["results"]],
             [1, 2],
         )
+        self.assertEqual(
+            [item["visit_number"] for item in reports[1]["results"]],
+            [1, 2],
+        )
         self.assertEqual(reports[0]["results"], [])
+
+    def test_selective_deletion_uses_the_atomic_supabase_function(self):
+        storage = SupabaseStorage(
+            "https://project.supabase.co", "sb_secret_value_for_tests_123456789"
+        )
+        with mock.patch.object(
+            SupabaseStorage,
+            "_request",
+            return_value={"deleted_visits": 2, "deleted_runs": 1},
+        ) as request:
+            summary = storage.delete_results(
+                visits=[
+                    {"run_id": "run_123", "visit_number": 4},
+                    {"run_id": "run_123", "visit_number": 5},
+                ],
+                run_ids=["run_456"],
+            )
+
+        self.assertEqual(summary, {"visits": 2, "runs": 1})
+        self.assertEqual(
+            request.call_args.args,
+            ("POST", "rpc/ghost_clicker_delete_results"),
+        )
+        self.assertEqual(
+            request.call_args.kwargs["body"]["p_run_ids"], ["run_456"]
+        )
 
 
 if __name__ == "__main__":

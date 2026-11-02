@@ -62,7 +62,7 @@ Le schéma versionné se trouve dans `supabase/migrations/`. Le Blueprint rensei
 
 Les tables utilisent Row Level Security et n’accordent aucun accès aux rôles publics `anon` et `authenticated`. Seule la clé serveur peut lire ou écrire les données du bot. Si Supabase est momentanément indisponible, le service garde un cache local de secours et affiche l’état de la base dans la console.
 
-### 3. Préparer la passerelle et le fichier des cibles
+### 3. Préparer la passerelle et les cibles
 
 La passerelle Rayobyte utilise exactement cette valeur, sans lien `mailto:` ni mise en forme Markdown :
 
@@ -72,17 +72,15 @@ username:password@host:port
 
 La passerelle doit attribuer une nouvelle IP à chaque connexion. La valeur est saisie dans l’interface authentifiée, stockée uniquement dans `/tmp` et jamais ajoutée à Git. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
-Le fichier des cibles accepte deux formats :
+Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** permet d’ajouter chaque cible avec :
 
-```text
-# Un seul clic : le premier bouton redirige directement
-https://site-autorise.example/page | Continuer
+- un pseudo lisible ;
+- l’URL publique ;
+- le premier libellé exact ;
+- un éventuel second libellé ;
+- une case indiquant si la cible doit participer aux prochains lancements.
 
-# Deux clics au même emplacement
-https://site-autorise.example/page | Continuer | Confirmer
-```
-
-Avec deux champs, le bot clique une fois puis attend immédiatement la navigation. Avec trois champs, il clique deux fois au même emplacement, avec une pause de 500 ms entre les clics. Dans les deux cas, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sert à sélectionner le mode à deux clics et reste une valeur de référence : il n’est pas recherché dans la page.
+Sans second libellé, le bot clique une fois puis attend immédiatement la navigation. Avec un second libellé, il clique deux fois au même emplacement, avec une pause de 500 ms. Dans les deux cas, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sélectionne le mode à deux clics et reste une référence : il n’est pas recherché dans la page.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -97,16 +95,19 @@ Après le build :
    - utilisateur : `admin` ;
    - mot de passe : valeur de `ADMIN_TOKEN`.
 
-## Importer la configuration en ligne
+## Gérer la configuration en ligne
 
 Après connexion :
 
-1. saisissez la valeur dans le champ protégé puis cliquez sur **Enregistrer la passerelle** ;
-2. importez le fichier des cibles avec **Importer les URL** ;
-3. vérifiez que la passerelle est indiquée comme configurée ;
-4. vous pouvez ensuite modifier les lignes cibles directement dans la zone **Paramètres en ligne**.
+1. saisissez la passerelle dans le champ protégé ;
+2. ajoutez les cibles une par une dans la **Bibliothèque d’URL** ;
+3. utilisez leur pseudo pour les retrouver, puis consultez, modifiez ou supprimez chaque entrée ;
+4. cochez les URL à utiliser, ou employez **Tout sélectionner** et **Tout désélectionner** ;
+5. lancez le scénario : les exécutions manuelles et planifiées utilisent uniquement la sélection persistante.
 
-Le premier libellé après `|` doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque ce premier clic redirige directement. Ajoutez un second libellé pour demander un deuxième clic au même emplacement ; sa valeur reste uniquement une référence dans les résultats. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher le deuxième clic. Aucun redéploiement n’est nécessaire pour remplacer la passerelle ou les cibles.
+Le premier libellé doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
+
+Les formulaires, la sélection, le lancement, l’arrêt, le statut et les résultats utilisent l’API JSON intégrée : la page d’administration n’est pas entièrement rechargée après chaque action.
 
 ## Lancer le bot
 
@@ -121,7 +122,7 @@ Le mode de répétition est choisi dans l’interface :
 - **Intervalle** : tire un nombre entre le minimum et le maximum indiqués ;
 - **Continu** : fonctionne par cycles successifs de 5 minutes. Au début de chaque cycle, un nouveau nombre de répétitions est tiré entre le minimum et le maximum configurés. Le bot continue jusqu’au clic sur **Arrêter** et termine proprement la visite en cours.
 
-Si plusieurs cibles sont enregistrées, chacune est visitée une fois par répétition. Par exemple, 200 répétitions et 3 cibles produisent 600 visites. En mode continu, les 1 000 résultats les plus récents restent en mémoire afin de borner l’utilisation du processus, mais chaque visite terminée est enregistrée séparément dans Supabase et reste disponible dans l’export complet.
+Chaque cible cochée est visitée une fois par répétition ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions et 3 cibles sélectionnées produisent 600 visites. En mode continu, les 1 000 résultats les plus récents restent en mémoire afin de borner l’utilisation du processus, mais chaque visite terminée est enregistrée séparément dans Supabase et reste disponible dans l’export complet.
 
 Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, exécutions, visites et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. La passerelle Rayobyte demeure volontairement éphémère dans `/tmp` afin de ne pas enregistrer ses identifiants dans la base.
 
@@ -130,6 +131,7 @@ Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, exéc
 L’interface affiche :
 
 - date et source de l’exécution ;
+- pseudo et identifiant de la cible ;
 - mode d’exécution, numéro de répétition et total choisi lorsqu’il existe ;
 - nom de la passerelle et ouverture de connexion ;
 - URL initiale ;
@@ -139,6 +141,8 @@ L’interface affiche :
 - message d’erreur.
 
 Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne durable dans Supabase. L’interface charge un historique récent pour rester réactive ; le CSV demande l’ensemble des rapports et visites disponibles.
+
+Depuis la console, l’administrateur peut supprimer une visite, plusieurs visites cochées, une exécution complète ou tout l’historique. Ces suppressions sont effectuées directement dans Supabase ; la suppression d’une exécution efface aussi ses visites associées.
 
 ## Navigateur sur Render
 
@@ -188,7 +192,7 @@ python .\main.py
 ## Sécurité
 
 - authentification HTTP Basic avec `ADMIN_TOKEN` ;
-- protection CSRF des formulaires ;
+- protection CSRF des formulaires et mutations de l’API JSON ;
 - jeton administrateur uniquement dans les variables Render ou `.env` ;
 - clé serveur Supabase uniquement dans les variables secrètes Render ou `.env` ;
 - RLS activée sur toutes les tables, sans politique d’accès public ;
