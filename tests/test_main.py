@@ -401,7 +401,13 @@ class BrowserLifecycleTests(unittest.TestCase):
         manager = FakePlaywrightManager(chromium)
         settings = make_settings()
         targets = [
-            main.Target("https://one.example/page", "Continuer", "Confirmer"),
+            main.Target(
+                "https://one.example/page",
+                "Continuer",
+                "Confirmer",
+                target_id="target_one",
+                alias="Accueil",
+            ),
             main.Target("https://two.example/page", "Valider", "Terminer"),
             main.Target("https://direct.example/page", "Entrer"),
             main.Target("https://popup-source.example/page", "Ouvrir"),
@@ -456,6 +462,8 @@ class BrowserLifecycleTests(unittest.TestCase):
                 else f"{target.url}/redirected"
             )
             self.assertEqual(result.final_url, expected_final_url)
+            self.assertEqual(result.target_id, target.target_id)
+            self.assertEqual(result.target_alias, target.alias)
 
 
 class RepetitionPlanTests(unittest.TestCase):

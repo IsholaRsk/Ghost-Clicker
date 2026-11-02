@@ -34,6 +34,10 @@ class WebUploadTests(unittest.TestCase):
         self.client = web.APP.test_client()
         credentials = base64.b64encode(b"admin:TEST_ADMIN_TOKEN").decode("ascii")
         self.headers = {"Authorization": f"Basic {credentials}"}
+        self.api_headers = {
+            **self.headers,
+            "X-CSRF-Token": web.CSRF_TOKEN,
+        }
         with web.STATE_LOCK:
             web.RUN_STATE.update(
                 running=False,
@@ -75,15 +79,20 @@ class WebUploadTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Console d’exécution", content)
-        self.assertIn("Passerelle et cibles", content)
+        self.assertIn("Bibliothèque d’URL", content)
+        self.assertIn("Console dynamique", content)
         self.assertIn("color-scheme:dark", content)
         self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('class="status-grid"', content)
         self.assertIn("Base de données", content)
         self.assertIn("Cache local", content)
         self.assertIn('value="continuous"', content)
-        self.assertIn("cycle de 5 min", content)
+        self.assertIn("Cycles de cinq minutes", content)
         self.assertIn("Arrêter", content)
+        self.assertIn("/api/targets", content)
+        self.assertIn("fetch(url,options)", content)
+        self.assertNotIn('http-equiv="refresh"', content)
+        self.assertNotIn("Importer les cibles", content)
         self.assertNotIn("129–283", content)
         self.assertNotIn("--canvas:#f4f4f1", content)
         self.assertNotIn("radial-gradient", content)
@@ -158,19 +167,35 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(query["targets"], ["2"])
         settings = web.load_app_settings()
         self.assertEqual(
-            settings["targets"],
             [
-                {
-                    "url": "https://first.example/page",
-                    "button_text": "Continuer",
-                    "second_button_text": "Confirmer",
-                },
-                {
-                    "url": "https://unrelated.example.org/other",
-                    "button_text": "Valider",
-                    "second_button_text": "Terminer",
-                },
+                (
+                    item["alias"],
+                    item["url"],
+                    item["button_text"],
+                    item["second_button_text"],
+                    item["selected"],
+                )
+                for item in settings["targets"]
             ],
+            [
+                (
+                    "first.example",
+                    "https://first.example/page",
+                    "Continuer",
+                    "Confirmer",
+                    True,
+                ),
+                (
+                    "unrelated.example.org",
+                    "https://unrelated.example.org/other",
+                    "Valider",
+                    "Terminer",
+                    True,
+                ),
+            ],
+        )
+        self.assertTrue(
+            all(item["id"].startswith("target_") for item in settings["targets"])
         )
         self.assertTrue(settings["schedule_enabled"])
         self.assertEqual(settings["interval_minutes"], 120)
@@ -186,16 +211,12 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         query = parse_qs(urlsplit(response.headers["Location"]).query)
         self.assertEqual(query["targets"], ["1"])
-        self.assertEqual(
-            web.load_app_settings()["targets"],
-            [
-                {
-                    "url": "https://first.example/page",
-                    "button_text": "Continuer",
-                    "second_button_text": "",
-                }
-            ],
-        )
+        target = web.load_app_settings()["targets"][0]
+        self.assertEqual(target["alias"], "first.example")
+        self.assertEqual(target["url"], "https://first.example/page")
+        self.assertEqual(target["button_text"], "Continuer")
+        self.assertEqual(target["second_button_text"], "")
+        self.assertTrue(target["selected"])
         self.assertEqual(
             web.targets_to_text(web.load_app_settings()),
             "https://first.example/page | Continuer",
@@ -237,16 +258,89 @@ class WebUploadTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 303)
         settings = web.load_app_settings()
+        self.assertEqual(len(settings["targets"]), 1)
+        self.assertEqual(settings["targets"][0]["alias"], "edited.example")
         self.assertEqual(
-            settings["targets"],
-            [
-                {
-                    "url": "https://edited.example/page",
-                    "button_text": "Continuer",
-                    "second_button_text": "Confirmer",
-                }
-            ],
+            settings["targets"][0]["url"], "https://edited.example/page"
         )
+        self.assertTrue(settings["targets"][0]["selected"])
+
+    def test_target_crud_and_persistent_selection_use_json_without_redirects(self):
+        created = self.client.post(
+            "/api/targets",
+            json={
+                "alias": "Accueil partenaire",
+                "url": "https://partner.example/page",
+                "button_text": "Continuer",
+                "second_button_text": "Confirmer",
+                "selected": True,
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        created_value = created.get_json()
+        self.assertTrue(created_value["ok"])
+        self.assertEqual(len(created_value["targets"]), 1)
+        target_id = created_value["targets"][0]["id"]
+
+        listed = self.client.get("/api/targets", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(
+            listed.get_json()["targets"][0]["alias"], "Accueil partenaire"
+        )
+
+        updated = self.client.patch(
+            f"/api/targets/{target_id}",
+            json={"alias": "Partenaire principal", "selected": False},
+            headers=self.api_headers,
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.get_json()["targets"][0]["alias"], "Partenaire principal")
+        self.assertFalse(updated.get_json()["targets"][0]["selected"])
+        self.assertEqual(web.targets_from_settings(web.load_app_settings()), [])
+
+        selected = self.client.post(
+            "/api/targets/selection",
+            json={"mode": "all"},
+            headers=self.api_headers,
+        )
+        self.assertEqual(selected.status_code, 200)
+        active_targets = web.targets_from_settings(web.load_app_settings())
+        self.assertEqual(len(active_targets), 1)
+        self.assertEqual(active_targets[0].alias, "Partenaire principal")
+        self.assertEqual(active_targets[0].target_id, target_id)
+
+        deleted = self.client.delete(
+            f"/api/targets/{target_id}", headers=self.api_headers
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["targets"], [])
+
+    def test_api_mutations_require_csrf_and_reject_changes_while_running(self):
+        missing_csrf = self.client.post(
+            "/api/targets",
+            json={
+                "alias": "Test",
+                "url": "https://example.com",
+                "button_text": "Entrer",
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(missing_csrf.status_code, 400)
+
+        with web.STATE_LOCK:
+            web.RUN_STATE["running"] = True
+        blocked = self.client.post(
+            "/api/targets",
+            json={
+                "alias": "Test",
+                "url": "https://example.com",
+                "button_text": "Entrer",
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(blocked.status_code, 400)
+        self.assertIn("arrêt", blocked.get_json()["error"])
 
     def test_settings_support_a_custom_range_and_continuous_mode(self):
         target = "https://edited.example/page | Continuer"
@@ -295,9 +389,12 @@ class WebUploadTests(unittest.TestCase):
         persistent_settings = {
             "targets": [
                 {
+                    "id": "target_persistent",
+                    "alias": "Persistante",
                     "url": "https://persistent.example/page",
                     "button_text": "Continuer",
                     "second_button_text": "",
+                    "selected": True,
                 }
             ],
             "schedule_enabled": True,
@@ -434,6 +531,61 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(len(reports[0]["results"]), 2)
         self.assertFalse(reports[0]["in_progress"])
 
+    def test_results_can_be_deleted_by_visit_run_or_all_from_the_api(self):
+        web.append_report(
+            {
+                "run_id": "run_selective_123",
+                "source": "manuel",
+                "completed_visits": 2,
+                "results": [
+                    {"started_at": "first", "success": True},
+                    {"started_at": "second", "success": False},
+                ],
+            }
+        )
+
+        visit_deleted = self.client.delete(
+            "/api/results",
+            json={
+                "action": "selected",
+                "visits": [
+                    {"run_id": "run_selective_123", "visit_number": 1}
+                ],
+                "run_ids": [],
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(visit_deleted.status_code, 200)
+        remaining = visit_deleted.get_json()["reports"][0]["results"]
+        self.assertEqual([item["started_at"] for item in remaining], ["second"])
+
+        run_deleted = self.client.delete(
+            "/api/results",
+            json={
+                "action": "selected",
+                "visits": [],
+                "run_ids": ["run_selective_123"],
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(run_deleted.status_code, 200)
+        self.assertEqual(run_deleted.get_json()["reports"], [])
+
+        web.append_report(
+            {
+                "run_id": "run_clear_123",
+                "completed_visits": 1,
+                "results": [{"started_at": "third", "success": True}],
+            }
+        )
+        cleared = self.client.delete(
+            "/api/results",
+            json={"action": "all"},
+            headers=self.api_headers,
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.get_json()["reports"], [])
+
     def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
         web.append_report(
             {
@@ -459,6 +611,7 @@ class WebUploadTests(unittest.TestCase):
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("cible_id,pseudo_cible,mode_execution", content)
         self.assertIn("mode_execution,repetition", content)
         self.assertIn("repetition,repetitions_planifiees", content)
         self.assertIn(
