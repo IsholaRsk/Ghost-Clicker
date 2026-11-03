@@ -51,9 +51,10 @@ Le Blueprint utilise le plan Render **Starter** afin que la planification intern
 
 ### 2. Relier Supabase
 
-Le projet Supabase dédié contient quatre espaces persistants :
+Le projet Supabase dédié contient les données persistantes suivantes :
 
 - la configuration, les cibles et les pseudos de passerelles dans `ghost_clicker_settings` ;
+- les identifiants de passerelles chiffrés dans Supabase Vault, associés par `ghost_clicker_gateway_secrets` ;
 - le résumé de chaque exécution dans `ghost_clicker_reports` ;
 - chaque visite, sans troncature de l’historique, dans `ghost_clicker_visits` ;
 - un journal d’actions non sensible dans `ghost_clicker_events`.
@@ -70,7 +71,7 @@ Chaque passerelle Rayobyte utilise exactement cette valeur, sans lien `mailto:` 
 username:password@host:port
 ```
 
-La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Une seule entrée est active à la fois. Le pseudo, l’identifiant interne et la sélection active persistent dans les réglages Supabase, mais les identifiants Rayobyte sont stockés uniquement dans le registre protégé `/tmp/ghost-clicker-proxy-gateways.json`, en mode `0600`, et jamais dans Supabase ou Git. Après un redémarrage ou un redéploiement, les pseudos sont donc toujours visibles mais portent l’état **Identifiants manquants** jusqu’à leur ressaisie. La passerelle active doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
+La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Une seule entrée est active à la fois. Le pseudo, l’identifiant interne et la sélection active persistent dans les réglages Supabase. Les identifiants Rayobyte sont conservés durablement et chiffrés dans **Supabase Vault** ; ils ne sont jamais inclus dans les réglages, les réponses de l’API, les journaux ou Git. Un cache privé en mode `0600` dans `/tmp/ghost-clicker-proxy-gateways.json` sert uniquement à l’exécution locale. Après leur première saisie avec cette version, les passerelles restent disponibles après les redémarrages et redéploiements. La passerelle active doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
 Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** permet d’ajouter chaque cible avec :
 
@@ -97,7 +98,7 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface se présente comme une application sombre en cinq pages horizontales : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas ; un clic ou un balayage horizontal change de page sans rechargement complet.
+Après connexion, l’interface se présente comme une application sombre et lisible en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet.
 
 1. ouvrez **Passerelles**, ajoutez une ou plusieurs entrées avec leur pseudo et activez-en exactement une ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
@@ -124,7 +125,7 @@ Le mode de répétition est choisi dans l’interface :
 
 Chaque cible cochée est visitée une fois par répétition ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions et 3 cibles sélectionnées produisent 600 visites. En mode continu, les 1 000 résultats les plus récents restent en mémoire afin de borner l’utilisation du processus, mais chaque visite terminée est enregistrée séparément dans Supabase et reste disponible dans l’export complet.
 
-Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, pseudos de passerelles, sélection active, exécutions, visites et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Seuls les identifiants Rayobyte demeurent volontairement éphémères dans `/tmp` afin de ne jamais les enregistrer dans la base ; l’interface demande leur ressaisie lorsqu’ils ont disparu.
+Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, passerelles complètes, sélection active, exécutions, visites et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
 
 ## Résultats
 
@@ -196,7 +197,7 @@ python .\main.py
 - jeton administrateur uniquement dans les variables Render ou `.env` ;
 - clé serveur Supabase uniquement dans les variables secrètes Render ou `.env` ;
 - RLS activée sur toutes les tables, sans politique d’accès public ;
-- pseudos et sélection des passerelles persistés, mais identifiants proxy conservés en mode `0600` dans `/tmp` sur Render et jamais copiés dans Supabase ;
+- passerelles persistées durablement, avec identifiants chiffrés dans Supabase Vault et cache d’exécution privé en mode `0600` dans `/tmp` ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
 - exactement un clic par visite sans second libellé, ou deux clics au même emplacement lorsqu’il est configuré ;

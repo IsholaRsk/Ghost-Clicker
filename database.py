@@ -146,6 +146,36 @@ class SupabaseStorage:
             prefer="resolution=merge-duplicates,return=minimal",
         )
 
+    def load_gateway_secrets(self) -> dict[str, str]:
+        value = self._request(
+            "POST",
+            "rpc/ghost_clicker_load_gateway_secrets",
+            body={},
+        )
+        if not isinstance(value, dict):
+            raise StorageError("Le registre de passerelles Supabase est invalide.")
+        secrets: dict[str, str] = {}
+        for gateway_id, gateway_secret in value.items():
+            if not isinstance(gateway_id, str) or not isinstance(gateway_secret, str):
+                raise StorageError("Le registre de passerelles Supabase est invalide.")
+            secrets[gateway_id] = gateway_secret
+        return secrets
+
+    def save_gateway_secrets(self, value: dict[str, str]) -> None:
+        result = self._request(
+            "POST",
+            "rpc/ghost_clicker_replace_gateway_secrets",
+            body={"p_secrets": value},
+        )
+        try:
+            stored_count = int(result)
+        except (TypeError, ValueError) as exc:
+            raise StorageError(
+                "Supabase a renvoyé un bilan de passerelles invalide."
+            ) from exc
+        if stored_count != len(value):
+            raise StorageError("Supabase n'a pas conservé toutes les passerelles.")
+
     @staticmethod
     def _report_parts(
         value: dict[str, Any],
