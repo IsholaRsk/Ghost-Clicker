@@ -17,6 +17,7 @@ proxies.txt
 *[Pp]roxy*.txt
 *[Pp]roxies*.txt
 *[Rr]ayobyte*.txt
+*[Pp]roxy*[Gg]ateway*.json
 
 # IDE et système
 .vscode/

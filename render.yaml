@@ -20,6 +20,9 @@ services:
         value: "10"
       - key: PROXY_GATEWAY_FILE
         value: /tmp/ghost-clicker-proxy-gateway.txt
+      # Registre éphémère des identifiants, jamais synchronisé avec Supabase.
+      - key: PROXY_GATEWAYS_FILE
+        value: /tmp/ghost-clicker-proxy-gateways.json
       - key: HEADLESS
         value: "true"
       - key: NAVIGATION_TIMEOUT_MS

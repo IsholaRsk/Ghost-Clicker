@@ -1,4 +1,4 @@
-"""Console web dynamique : cibles persistantes, exécution et résultats."""
+"""Application web : cibles, passerelles, exécutions et résultats persistants."""
 
 from __future__ import annotations
 
@@ -70,6 +70,7 @@ RUN_STATE: dict[str, Any] = {
 
 DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "targets": [],
+    "gateways": [],
     "schedule_enabled": False,
     "interval_minutes": 60,
     "execution_mode": "fixed",
@@ -79,6 +80,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
 }
 SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 MAX_TARGET_ALIAS_LENGTH = 100
+MAX_GATEWAYS = 20
 
 
 def set_database_state(*, configured: bool, connected: bool, error: str = "") -> None:
@@ -153,6 +155,12 @@ def proxy_gateway_file_path() -> Path:
     return storage_path("PROXY_GATEWAY_FILE", DEFAULT_PROXY_GATEWAY_FILE)
 
 
+def proxy_gateways_file_path() -> Path:
+    return storage_path(
+        "PROXY_GATEWAYS_FILE", "/tmp/ghost-clicker-proxy-gateways.json"
+    )
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -190,6 +198,31 @@ def atomic_write_private_text(path: Path, value: str) -> None:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def read_gateway_secrets() -> dict[str, str]:
+    path = proxy_gateways_file_path()
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): str(secret)
+        for key, secret in value.items()
+        if SAFE_IDENTIFIER_PATTERN.fullmatch(str(key))
+        and isinstance(secret, str)
+    }
+
+
+def write_gateway_secrets(value: dict[str, str]) -> None:
+    atomic_write_private_text(
+        proxy_gateways_file_path(),
+        json.dumps(value, ensure_ascii=False, indent=2),
+    )
 
 
 def bounded_integer(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -259,6 +292,112 @@ def normalize_target_records(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def normalize_gateway_records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    active_seen = False
+    for position, raw_item in enumerate(value[:MAX_GATEWAYS], start=1):
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        identifier = str(item.get("id", "")).strip()
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(identifier):
+            source = f"{position}\x1f{item.get('alias', '')}"
+            digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
+            identifier = f"gateway_{digest}"
+        alias = " ".join(str(item.get("alias", "")).strip().split())
+        if not alias:
+            alias = f"Passerelle {position}"
+        active = bool(item.get("active", False)) and not active_seen
+        active_seen = active_seen or active
+        normalized.append(
+            {
+                "id": identifier,
+                "alias": alias[:MAX_TARGET_ALIAS_LENGTH],
+                "active": active,
+            }
+        )
+    if normalized and not active_seen:
+        normalized[0]["active"] = True
+    return normalized
+
+
+def validate_gateway_alias(value: str) -> str:
+    alias = " ".join(value.strip().split())
+    if not alias:
+        raise ConfigurationError("Le pseudo de la passerelle est obligatoire.")
+    if len(alias) > MAX_TARGET_ALIAS_LENGTH:
+        raise ConfigurationError(
+            f"Le pseudo est limité à {MAX_TARGET_ALIAS_LENGTH} caractères."
+        )
+    if any(ord(character) < 32 or ord(character) == 127 for character in alias):
+        raise ConfigurationError("Le pseudo contient un caractère interdit.")
+    return alias
+
+
+def gateways_for_api(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    secrets_by_id = read_gateway_secrets()
+    return [
+        {**gateway, "configured": gateway["id"] in secrets_by_id}
+        for gateway in settings.get("gateways", [])
+        if isinstance(gateway, dict)
+    ]
+
+
+def migrate_legacy_gateway(settings: dict[str, Any]) -> None:
+    """Adopte une ancienne passerelle unique sans exposer ses identifiants."""
+
+    gateways = settings.get("gateways", [])
+    path = proxy_gateway_file_path()
+    if gateways or not path.exists():
+        return
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise ConfigurationError(
+            "Impossible de lire l'ancienne passerelle éphémère."
+        ) from exc
+    parsed = parse_proxy_gateway_text(content)
+    identifier = "gateway_legacy"
+    settings["gateways"] = [
+        {"id": identifier, "alias": parsed.name, "active": True}
+    ]
+    secrets_by_id = read_gateway_secrets()
+    secrets_by_id[identifier] = content.strip()
+    write_gateway_secrets(secrets_by_id)
+    save_app_settings(settings)
+
+
+def sync_active_gateway(settings: dict[str, Any]) -> bool:
+    migrate_legacy_gateway(settings)
+    gateways = settings.get("gateways", [])
+    if not isinstance(gateways, list) or not gateways:
+        return False
+    active = next(
+        (
+            item
+            for item in gateways
+            if isinstance(item, dict) and item.get("active")
+        ),
+        None,
+    )
+    secrets_by_id = read_gateway_secrets()
+    secret = secrets_by_id.get(str(active.get("id", ""))) if active else None
+    path = proxy_gateway_file_path()
+    if active is None or not secret:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ConfigurationError(
+                "Impossible de désactiver la passerelle éphémère."
+            ) from exc
+        return False
+    alias = validate_gateway_alias(str(active.get("alias", "")))
+    atomic_write_private_text(path, f"# alias: {alias}\n{secret.strip()}\n")
+    return True
+
+
 def validated_target_record(
     value: dict[str, Any], *, target_id: str | None = None
 ) -> dict[str, Any]:
@@ -295,6 +434,7 @@ def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
     maximum = max(maximum, minimum)
     return {
         "targets": normalize_target_records(value.get("targets", [])),
+        "gateways": normalize_gateway_records(value.get("gateways", [])),
         "schedule_enabled": bool(value.get("schedule_enabled", False)),
         "interval_minutes": bounded_integer(
             value.get("interval_minutes"), 60, 60, 10_080
@@ -680,18 +820,22 @@ def require_csrf() -> None:
         raise ConfigurationError("Jeton de sécurité invalide. Rechargez la page.")
 
 
-def read_browser_configuration() -> tuple[BrowserSettings | None, str]:
+def read_browser_configuration(
+    app_settings: dict[str, Any] | None = None,
+) -> tuple[BrowserSettings | None, str]:
     try:
+        sync_active_gateway(app_settings or load_app_settings())
         return load_browser_settings(BASE_DIR), ""
-    except ConfigurationError as exc:
+    except (ConfigurationError, OSError) as exc:
         return None, str(exc)
 
 
 def execute_job(source: str) -> None:
     run_id = ""
     try:
-        browser_settings = load_browser_settings(BASE_DIR)
         app_settings = load_app_settings()
+        sync_active_gateway(app_settings)
+        browser_settings = load_browser_settings(BASE_DIR)
         targets = targets_from_settings(app_settings)
         if not targets:
             raise ConfigurationError("Aucune URL n'est sélectionnée.")
@@ -888,6 +1032,7 @@ def reports_for_api(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def api_snapshot(*, include_targets: bool = True) -> dict[str, Any]:
     reports = reports_for_api(load_reports())
     settings = load_app_settings() if include_targets else None
+    gateway_ready = sync_active_gateway(settings) if settings is not None else False
     with STATE_LOCK:
         state = dict(RUN_STATE)
     with DATABASE_LOCK:
@@ -896,11 +1041,12 @@ def api_snapshot(*, include_targets: bool = True) -> dict[str, Any]:
         "ok": True,
         "run": state,
         "database": database_state,
-        "gateway_ready": proxy_gateway_file_path().exists(),
+        "gateway_ready": gateway_ready,
         "reports": reports,
     }
     if settings is not None:
         value["targets"] = settings.get("targets", [])
+        value["gateways"] = gateways_for_api(settings)
         value["selected_target_count"] = sum(
             1 for item in value["targets"] if item.get("selected", True)
         )
@@ -923,21 +1069,245 @@ def api_status() -> Response:
     return jsonify({"ok": True, "run": state})
 
 
+@APP.get("/api/gateways")
+def api_list_gateways() -> Response:
+    settings = load_app_settings()
+    sync_active_gateway(settings)
+    return jsonify({"ok": True, "gateways": gateways_for_api(settings)})
+
+
+@APP.post("/api/gateways")
+def api_add_gateway() -> tuple[Response, int] | Response:
+    try:
+        require_csrf()
+        require_idle_configuration()
+        payload = request_json_object()
+        alias = validate_gateway_alias(str(payload.get("alias", "")))
+        content = str(payload.get("gateway", "")).strip()
+        if not content:
+            raise ConfigurationError("Saisissez les identifiants de la passerelle.")
+        if len(content) > 4_096:
+            raise ConfigurationError("La passerelle proxy est trop longue.")
+        parse_proxy_gateway_text(content)
+        requested_active = payload.get("active", False)
+        if not isinstance(requested_active, bool):
+            raise ConfigurationError("L'état actif de la passerelle est invalide.")
+
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        if len(gateways) >= MAX_GATEWAYS:
+            raise ConfigurationError(f"Maximum : {MAX_GATEWAYS} passerelles.")
+        identifier = f"gateway_{secrets.token_urlsafe(12)}"
+        make_active = requested_active or not gateways
+        if make_active:
+            gateways = [{**item, "active": False} for item in gateways]
+        gateway = {"id": identifier, "alias": alias, "active": make_active}
+        gateways.append(gateway)
+        settings["gateways"] = gateways
+        save_app_settings(settings)
+
+        secrets_by_id = read_gateway_secrets()
+        secrets_by_id[identifier] = content
+        write_gateway_secrets(secrets_by_id)
+        sync_active_gateway(settings)
+        record_database_event(
+            "gateway_created",
+            {
+                "gateway_id": identifier,
+                "alias": alias,
+                "active": make_active,
+                "updated_at": now_iso(),
+            },
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Passerelle ajoutée.",
+                "gateways": gateways_for_api(settings),
+            }
+        )
+    except ConfigurationError as exc:
+        return api_error(exc)
+
+
+@APP.patch("/api/gateways/<gateway_id>")
+def api_update_gateway(gateway_id: str) -> tuple[Response, int] | Response:
+    try:
+        require_csrf()
+        require_idle_configuration()
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(gateway_id):
+            raise ConfigurationError("Identifiant de passerelle invalide.")
+        payload = request_json_object()
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        for index, gateway in enumerate(gateways):
+            if gateway.get("id") == gateway_id:
+                updated = dict(gateway)
+                if "alias" in payload:
+                    updated["alias"] = validate_gateway_alias(
+                        str(payload.get("alias", ""))
+                    )
+                gateways[index] = updated
+                break
+        else:
+            raise ConfigurationError("Passerelle introuvable.")
+
+        content = str(payload.get("gateway", "")).strip()
+        if content:
+            if len(content) > 4_096:
+                raise ConfigurationError("La passerelle proxy est trop longue.")
+            parse_proxy_gateway_text(content)
+        settings["gateways"] = gateways
+        save_app_settings(settings)
+        if content:
+            secrets_by_id = read_gateway_secrets()
+            secrets_by_id[gateway_id] = content
+            write_gateway_secrets(secrets_by_id)
+        sync_active_gateway(settings)
+        record_database_event(
+            "gateway_updated",
+            {"gateway_id": gateway_id, "updated_at": now_iso()},
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Passerelle modifiée.",
+                "gateways": gateways_for_api(settings),
+            }
+        )
+    except ConfigurationError as exc:
+        return api_error(
+            exc, 404 if str(exc) == "Passerelle introuvable." else 400
+        )
+
+
+@APP.post("/api/gateways/<gateway_id>/select")
+def api_select_gateway(gateway_id: str) -> tuple[Response, int] | Response:
+    try:
+        require_csrf()
+        require_idle_configuration()
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(gateway_id):
+            raise ConfigurationError("Identifiant de passerelle invalide.")
+        secrets_by_id = read_gateway_secrets()
+        if gateway_id not in secrets_by_id:
+            raise ConfigurationError(
+                "Ressaisissez les identifiants avant d'activer cette passerelle."
+            )
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        if not any(item.get("id") == gateway_id for item in gateways):
+            raise ConfigurationError("Passerelle introuvable.")
+        gateways = [
+            {**item, "active": item.get("id") == gateway_id}
+            for item in gateways
+        ]
+        settings["gateways"] = gateways
+        save_app_settings(settings)
+        sync_active_gateway(settings)
+        record_database_event(
+            "gateway_selected",
+            {"gateway_id": gateway_id, "updated_at": now_iso()},
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Passerelle active mise à jour.",
+                "gateways": gateways_for_api(settings),
+            }
+        )
+    except ConfigurationError as exc:
+        return api_error(
+            exc, 404 if str(exc) == "Passerelle introuvable." else 400
+        )
+
+
+@APP.delete("/api/gateways/<gateway_id>")
+def api_delete_gateway(gateway_id: str) -> tuple[Response, int] | Response:
+    try:
+        require_csrf()
+        require_idle_configuration()
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(gateway_id):
+            raise ConfigurationError("Identifiant de passerelle invalide.")
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        retained = [item for item in gateways if item.get("id") != gateway_id]
+        if len(retained) == len(gateways):
+            raise ConfigurationError("Passerelle introuvable.")
+        secrets_by_id = read_gateway_secrets()
+        secrets_by_id.pop(gateway_id, None)
+        if retained and not any(item.get("active") for item in retained):
+            configured_id = next(
+                (
+                    str(item.get("id"))
+                    for item in retained
+                    if str(item.get("id")) in secrets_by_id
+                ),
+                str(retained[0].get("id")),
+            )
+            retained = [
+                {**item, "active": str(item.get("id")) == configured_id}
+                for item in retained
+            ]
+        settings["gateways"] = retained
+        if not retained:
+            try:
+                proxy_gateway_file_path().unlink(missing_ok=True)
+            except OSError as exc:
+                raise ConfigurationError(
+                    "Impossible de supprimer la passerelle active."
+                ) from exc
+        save_app_settings(settings)
+        write_gateway_secrets(secrets_by_id)
+        sync_active_gateway(settings)
+        record_database_event(
+            "gateway_deleted",
+            {"gateway_id": gateway_id, "updated_at": now_iso()},
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Passerelle supprimée.",
+                "gateways": gateways_for_api(settings),
+            }
+        )
+    except ConfigurationError as exc:
+        return api_error(
+            exc, 404 if str(exc) == "Passerelle introuvable." else 400
+        )
+
+
 @APP.post("/api/gateway")
 def api_save_gateway() -> tuple[Response, int] | Response:
     try:
         require_csrf()
+        require_idle_configuration()
         content = str(request_json_object().get("gateway", "")).strip()
         if not content:
             raise ConfigurationError("Saisissez la passerelle proxy.")
         if len(content) > 4_096:
             raise ConfigurationError("La passerelle proxy est trop longue.")
         parse_proxy_gateway_text(content)
-        atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        active = next((item for item in gateways if item.get("active")), None)
+        if active is None:
+            atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+            sync_active_gateway(settings)
+        else:
+            secrets_by_id = read_gateway_secrets()
+            secrets_by_id[str(active["id"])] = content
+            write_gateway_secrets(secrets_by_id)
+            sync_active_gateway(settings)
         record_database_event(
             "gateway_updated", {"configured": True, "updated_at": now_iso()}
         )
-        return jsonify({"ok": True, "message": "Passerelle enregistrée."})
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Passerelle enregistrée.",
+                "gateways": gateways_for_api(settings),
+            }
+        )
     except ConfigurationError as exc:
         return api_error(exc)
 
@@ -1147,8 +1517,10 @@ def api_update_settings() -> tuple[Response, int] | Response:
 def api_run_now() -> tuple[Response, int] | Response:
     try:
         require_csrf()
+        app_settings = load_app_settings()
+        sync_active_gateway(app_settings)
         load_browser_settings(BASE_DIR)
-        targets = targets_from_settings(load_app_settings())
+        targets = targets_from_settings(app_settings)
         if not targets:
             raise ConfigurationError("Sélectionnez au moins une URL.")
         if not start_job("manuel"):
@@ -1247,13 +1619,24 @@ def read_uploaded_text(field_name: str) -> str:
 def save_gateway() -> Response:
     try:
         require_csrf()
+        require_idle_configuration()
         content = request.form.get("gateway", "").strip()
         if not content:
             raise ConfigurationError("Saisissez la passerelle proxy.")
         if len(content) > 4_096:
             raise ConfigurationError("La passerelle proxy est trop longue.")
         parse_proxy_gateway_text(content)
-        atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+        settings = load_app_settings()
+        gateways = list(settings.get("gateways", []))
+        active = next((item for item in gateways if item.get("active")), None)
+        if active is None:
+            atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
+            sync_active_gateway(settings)
+        else:
+            secrets_by_id = read_gateway_secrets()
+            secrets_by_id[str(active["id"])] = content
+            write_gateway_secrets(secrets_by_id)
+            sync_active_gateway(settings)
         record_database_event(
             "gateway_updated",
             {"configured": True, "updated_at": now_iso()},
@@ -1341,6 +1724,7 @@ def update_settings() -> Response:
         save_app_settings(
             {
                 "targets": target_records,
+                "gateways": current.get("gateways", []),
                 "schedule_enabled": schedule_enabled,
                 "interval_minutes": interval,
                 "execution_mode": execution_mode,
@@ -1371,8 +1755,10 @@ def update_settings() -> Response:
 def run_now() -> Response:
     try:
         require_csrf()
+        app_settings = load_app_settings()
+        sync_active_gateway(app_settings)
         load_browser_settings(BASE_DIR)
-        targets = targets_from_settings(load_app_settings())
+        targets = targets_from_settings(app_settings)
         if not targets:
             raise ConfigurationError("Sélectionnez au moins une URL.")
         started = start_job("manuel")
@@ -1484,8 +1870,9 @@ def download_results() -> Response:
 @APP.get("/")
 def home() -> str:
     app_settings = load_app_settings()
-    _browser_settings, configuration_error = read_browser_configuration()
+    _browser_settings, configuration_error = read_browser_configuration(app_settings)
     reports = reports_for_api(load_reports())
+    gateways = gateways_for_api(app_settings)
     with STATE_LOCK:
         state = dict(RUN_STATE)
     with DATABASE_LOCK:
@@ -1526,126 +1913,104 @@ def home() -> str:
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ghost Clicker — Console</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d0f12">
+<title>Ghost Clicker</title>
 <style>
-:root{color-scheme:dark;--canvas:#0d0f12;--surface:#15181c;--surface-soft:#1a1e23;--ink:#f2f4f7;--muted:#9ba3ad;--line:#292e35;--line-strong:#3c434d;--success:#58c68a;--success-soft:#14271d;--warning:#f0b84b;--danger:#ff8b81;--danger-soft:#2b1818;--focus:#7e9cc8}
-*{box-sizing:border-box}
-html{background:var(--canvas)}
-body{margin:0;min-height:100vh;background:var(--canvas);color:var(--ink);font:14px/1.55 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
-a{color:inherit}.shell{width:min(1200px,calc(100% - 40px));margin:0 auto}
-.topbar{background:rgba(13,15,18,.92);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;backdrop-filter:blur(10px)}
-.topbar-inner{height:64px;display:flex;align-items:center;justify-content:space-between;gap:24px}
-.brand{display:inline-flex;align-items:center;gap:11px;text-decoration:none;font-size:15px;font-weight:680}.brand-mark{width:28px;height:28px;display:grid;place-items:center;background:var(--ink);color:var(--canvas);border-radius:7px;font-size:12px;font-weight:800}
-.topbar-note{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.service-dot{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 0 3px var(--success-soft)}
-main{padding:44px 0 64px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:36px;margin-bottom:26px}.eyebrow{display:block;margin-bottom:8px;color:var(--muted);font-size:10px;font-weight:760;letter-spacing:.13em;text-transform:uppercase}
-h1,h2,h3,p{margin-top:0}h1{margin-bottom:10px;font-size:clamp(30px,5vw,44px);line-height:1.08;letter-spacing:-.045em}h2{margin:0;font-size:18px;letter-spacing:-.02em}.hero-copy,.panel-heading p,.hint{color:var(--muted)}.hero-copy{max-width:690px;margin:0}.hero-facts{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}.fact{border:1px solid var(--line);padding:7px 10px;border-radius:999px;color:var(--muted);font-size:11px;white-space:nowrap}
-.notices{display:grid;gap:8px;margin-bottom:18px;min-height:0}.notice{padding:11px 13px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:8px;background:#151d27;color:#c6d2df}.notice.error{border-color:#5c2c2c;border-left-color:var(--danger);background:var(--danger-soft);color:#ffd0cc}
-.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{min-width:0;padding:15px 17px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.stat-label{display:block;margin-bottom:7px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.stat-value{display:flex;align-items:center;gap:9px;margin:0;font-size:14px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.status-dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%}.status-dot.idle,.status-dot.ready{background:var(--success)}.status-dot.running{background:#7da6e3;animation:pulse 1.7s ease-in-out infinite}.status-dot.warning{background:var(--warning)}@keyframes pulse{50%{opacity:.38}}
-.panel{margin-bottom:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}.panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:19px 21px 16px;border-bottom:1px solid var(--line)}.panel-heading p{margin:5px 0 0;font-size:13px}.panel-body{padding:21px}.count{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;white-space:nowrap}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.form-grid .wide{grid-column:1/-1}.content-grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:16px;align-items:start}
-label{display:block;margin-bottom:6px;color:#c9ced5;font-size:11px;font-weight:670}input,textarea,select{width:100%;border:1px solid var(--line-strong);border-radius:8px;background:#101317;color:var(--ink);font:inherit;outline:none}input,select{height:40px;padding:0 11px}textarea{min-height:90px;padding:10px 11px;resize:vertical}input:focus,textarea:focus,select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(126,156,200,.13)}input[type=checkbox],input[type=radio]{width:15px;height:15px;padding:0;accent-color:#dce3ec}.check-row{display:flex;align-items:center;gap:8px;margin:9px 0 0}.check-row label{margin:0}
-button,.button{min-height:38px;border:1px solid var(--ink);border-radius:8px;background:var(--ink);color:#11151a;padding:0 13px;font:inherit;font-size:12px;font-weight:760;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{opacity:.86}button:disabled{cursor:not-allowed;opacity:.42}.secondary{border-color:var(--line-strong);background:transparent;color:var(--ink)}.danger{border-color:#713b3b;background:var(--danger-soft);color:var(--danger)}.small{min-height:30px;padding:0 9px;font-size:10px}.actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.form-actions{display:flex;gap:8px;margin-top:14px}.mode-options{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.mode-option{display:flex;align-items:flex-start;gap:8px;margin:0;padding:10px;border:1px solid var(--line);border-radius:8px;background:#121519}.mode-option span{font-size:11px}.mode-option small{display:block;color:var(--muted);font-weight:400}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.run-specs{display:grid;gap:0;margin:14px 0 18px}.run-specs div{display:flex;justify-content:space-between;gap:20px;padding:9px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:11px}.run-specs dd{margin:0;text-align:right;font-size:11px;font-weight:650}
-.table-wrap{overflow:auto}table{width:100%;min-width:980px;border-collapse:collapse}th,td{padding:10px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:var(--surface-soft);color:var(--muted);font-size:9px;font-weight:750;letter-spacing:.07em;text-transform:uppercase}td{font-size:11px}tbody tr:hover{background:#191d22}.url-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:800}.success{background:var(--success-soft);color:var(--success)}.failure{background:var(--danger-soft);color:var(--danger)}.empty{padding:30px;text-align:center;color:var(--muted)}.row-actions{display:flex;gap:5px}.target-selected{background:#171d1a}.muted{color:var(--muted)}.footer{padding-top:8px;color:var(--muted);font-size:11px;text-align:center}
-@media(max-width:900px){.hero{display:block}.hero-facts{justify-content:flex-start;margin-top:18px}.status-grid,.grid,.content-grid{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}}
-@media(max-width:600px){.shell{width:min(100% - 24px,1200px)}main{padding-top:30px}.status-grid{gap:8px}.panel-header,.panel-body{padding:16px}.mode-options,.repeat-fields{grid-template-columns:1fr}.actions button,.actions .button{width:100%}}
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+:root{color-scheme:dark;--canvas:#0d0f12;--surface:#15181c;--soft:#1a1e23;--ink:#f2f4f7;--muted:#9ba3ad;--line:#292e35;--strong:#3c434d;--success:#58c68a;--success-bg:#14271d;--warning:#f0b84b;--danger:#ff8b81;--danger-bg:#2b1818;--focus:#7e9cc8;--nav-h:72px;--top-h:58px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--canvas)}body{color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}button,input,select{font:inherit}a{color:inherit}
+.topbar{height:var(--top-h);border-bottom:1px solid var(--line);background:rgba(13,15,18,.94);backdrop-filter:blur(12px);display:flex;align-items:center;position:relative;z-index:20}.topbar-inner{width:min(1100px,calc(100% - 28px));margin:auto;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:10px;font-weight:750}.brand-mark{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--ink);color:var(--canvas);font-size:12px}.page-title{color:var(--muted);font-size:12px;font-weight:700}
+.notices{position:fixed;z-index:50;top:66px;left:50%;transform:translateX(-50%);width:min(620px,calc(100% - 24px));display:grid;gap:7px}.notice{padding:11px 13px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:9px;background:#151d27;color:#c6d2df;box-shadow:0 10px 30px rgba(0,0,0,.25)}.notice.error{border-color:#5c2c2c;border-left-color:var(--danger);background:var(--danger-bg);color:#ffd0cc}
+.app-viewport{height:calc(100dvh - var(--top-h) - var(--nav-h));overflow:hidden}.app-track{height:100%;display:flex;align-items:stretch;transition:transform .32s cubic-bezier(.22,.61,.36,1);will-change:transform}.app-page{flex:0 0 100%;height:100%;overflow-y:auto;overscroll-behavior:contain;padding:18px max(14px,calc((100% - 1100px)/2)) 28px;scrollbar-gutter:stable}.page-head{margin-bottom:16px}.eyebrow{display:block;margin-bottom:6px;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}h1,h2,p{margin-top:0}h1{margin-bottom:5px;font-size:26px;line-height:1.15;letter-spacing:-.035em}h2{margin:0;font-size:17px;letter-spacing:-.02em}.page-head p,.panel-head p,.hint{color:var(--muted)}.page-head p{margin:0}
+.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.stat{min-width:0;padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.stat-label{display:block;margin-bottom:6px;color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.stat-value{display:flex;align-items:center;gap:8px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;font-weight:700}.status-dot{width:8px;height:8px;flex:none;border-radius:50%}.status-dot.idle,.status-dot.ready{background:var(--success)}.status-dot.running{background:#7da6e3;animation:pulse 1.7s infinite}.status-dot.warning{background:var(--warning)}@keyframes pulse{50%{opacity:.35}}
+.panel{margin-bottom:14px;border:1px solid var(--line);border-radius:13px;background:var(--surface);overflow:hidden}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:17px 18px 14px;border-bottom:1px solid var(--line)}.panel-head p{margin:4px 0 0;font-size:12px}.panel-body{padding:18px}.count{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;white-space:nowrap}.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.wide{grid-column:1/-1}
+label{display:block;margin-bottom:5px;color:#c9ced5;font-size:11px;font-weight:700}input,select{width:100%;height:40px;border:1px solid var(--strong);border-radius:9px;background:#101317;color:var(--ink);padding:0 11px;outline:none}input:focus,select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(126,156,200,.13)}input[type=checkbox],input[type=radio]{width:15px;height:15px;padding:0;accent-color:#dce3ec}.check-row{display:flex;align-items:center;gap:8px;margin-top:10px}.check-row label{margin:0}
+button,.button{min-height:38px;border:1px solid var(--ink);border-radius:9px;background:var(--ink);color:#11151a;padding:0 13px;font-size:12px;font-weight:800;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{opacity:.86}button:disabled{cursor:not-allowed;opacity:.4}.secondary{border-color:var(--strong);background:transparent;color:var(--ink)}.danger{border-color:#713b3b;background:var(--danger-bg);color:var(--danger)}.small{min-height:30px;padding:0 9px;font-size:10px}.actions,.form-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.form-actions{margin-top:14px}.badge{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:800}.success{background:var(--success-bg);color:var(--success)}.failure{background:var(--danger-bg);color:var(--danger)}.active-badge{background:#172337;color:#9bbce8}.missing-badge{background:#2a2212;color:var(--warning)}
+.mode-options{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.mode-option{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#121519}.mode-option span{font-size:11px}.mode-option small{display:block;color:var(--muted);font-weight:400}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.run-specs{display:grid;margin:0 0 16px}.run-specs div{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:11px}.run-specs dd{margin:0;text-align:right;font-size:11px;font-weight:700}
+.table-wrap{overflow:auto}table{width:100%;min-width:880px;border-collapse:collapse}th,td{padding:10px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:var(--soft);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}td{font-size:11px}tbody tr:hover{background:#191d22}.url-cell{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-actions{display:flex;gap:5px}.target-selected,.gateway-active{background:#171d1a}.empty{padding:30px;text-align:center;color:var(--muted)}
+.bottom-nav{height:calc(var(--nav-h) + env(safe-area-inset-bottom));position:fixed;z-index:40;left:0;right:0;bottom:0;padding:6px max(10px,calc((100% - 680px)/2)) env(safe-area-inset-bottom);border-top:1px solid var(--line);background:rgba(17,20,24,.96);backdrop-filter:blur(16px);display:grid;grid-template-columns:repeat(5,1fr);gap:3px}.nav-item{min-width:0;border:0;background:transparent;color:var(--muted);border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 2px;font-size:9px;font-weight:700}.nav-item svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.nav-item.active{color:var(--ink);background:#22272e}.nav-item:hover{opacity:1;background:#1c2026}.footer-note{color:var(--muted);font-size:11px;text-align:center;padding:8px 0}
+@media(max-width:800px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.two-col,.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.mode-options,.repeat-fields{grid-template-columns:1fr}.app-page{padding-left:12px;padding-right:12px}}
+@media(max-width:440px){:root{--nav-h:68px}.page-head{margin-bottom:12px}h1{font-size:23px}.panel-head,.panel-body{padding:14px}.status-grid{gap:7px}.stat{padding:12px}.nav-item span{font-size:8px}}
+@media(prefers-reduced-motion:reduce){.app-track{transition:none}*{animation:none!important}}
 </style>
 </head>
 <body>
-<header class="topbar"><div class="shell topbar-inner"><a class="brand" href="/" aria-label="Accueil"><span class="brand-mark">G</span><span>Ghost Clicker</span></a><div class="topbar-note"><span class="service-dot"></span>Console dynamique</div></div></header>
-<main class="shell">
-<section class="hero"><div><span class="eyebrow">Automatisation</span><h1>Console d’exécution</h1><p class="hero-copy">Gérez les cibles, choisissez celles à utiliser et consultez les résultats sans recharger toute la page.</p></div><div class="hero-facts"><span class="fact">Chromium neuf / visite</span><span class="fact">Sélection persistante</span><span class="fact">Supabase</span></div></section>
+<header class="topbar"><div class="topbar-inner"><div class="brand"><span class="brand-mark">G</span><span>Ghost Clicker</span></div><span id="page-title" class="page-title">Accueil</span></div></header>
 <div id="notices" class="notices" aria-live="polite">__MESSAGES__</div>
-<section class="status-grid">
-<article class="stat"><span class="stat-label">État</span><p id="run-status" class="stat-value"><span id="run-dot" class="status-dot idle"></span>En attente</p></article>
-<article class="stat"><span class="stat-label">Base de données</span><p class="stat-value"><span id="database-dot" class="status-dot __DATABASE_CLASS__"></span><span id="database-status">__DATABASE_STATUS__</span></p></article>
-<article class="stat"><span class="stat-label">Passerelle</span><p class="stat-value"><span id="gateway-dot" class="status-dot warning"></span><span id="gateway-status">Absente</span></p></article>
-<article class="stat"><span class="stat-label">Cibles actives</span><p id="selected-count-card" class="stat-value">__SELECTED_COUNT__ / __TARGET_COUNT__</p></article>
+<main class="app-viewport"><div id="app-track" class="app-track">
+<section class="app-page" data-page="home" aria-label="Accueil">
+<div class="page-head"><span class="eyebrow">Tableau de bord</span><h1>Vue d’ensemble</h1><p>Lancez le bot et suivez son état en temps réel.</p></div>
+<div class="status-grid"><article class="stat"><span class="stat-label">Exécution</span><p id="run-status" class="stat-value"><span id="run-dot" class="status-dot idle"></span>En attente</p></article><article class="stat"><span class="stat-label">Base de données</span><p class="stat-value"><span id="database-dot" class="status-dot __DATABASE_CLASS__"></span><span id="database-status">__DATABASE_STATUS__</span></p></article><article class="stat"><span class="stat-label">Passerelle active</span><p class="stat-value"><span id="gateway-dot" class="status-dot warning"></span><span id="gateway-status">Absente</span></p></article><article class="stat"><span class="stat-label">Cibles actives</span><p id="selected-count-card" class="stat-value">__SELECTED_COUNT__ / __TARGET_COUNT__</p></article></div>
+<div class="two-col"><section class="panel"><header class="panel-head"><div><span class="eyebrow">Exécution</span><h2>Lancer le scénario</h2><p>Seules les URL cochées utilisent la passerelle active.</p></div></header><div class="panel-body"><dl class="run-specs"><div><dt>Cibles sélectionnées</dt><dd id="run-selected-count">__SELECTED_COUNT__</dd></div><div><dt>Passerelle</dt><dd id="run-gateway-name">Aucune</dd></div><div><dt>Navigateur</dt><dd>Chromium neuf par visite</dd></div></dl><div class="actions"><button id="run-button" type="button">Lancer maintenant</button><button id="stop-button" class="danger" type="button" disabled>Arrêter</button></div></div></section><section class="panel"><header class="panel-head"><div><span class="eyebrow">Raccourcis</span><h2>Actions</h2><p>Accédez directement aux données utiles.</p></div></header><div class="panel-body"><div class="actions"><button class="secondary" data-go="targets" type="button">Gérer les URL</button><button class="secondary" data-go="gateways" type="button">Gérer les passerelles</button><button class="secondary" data-go="results" type="button">Voir les résultats</button><a class="button secondary" href="/results.csv">Exporter le CSV</a></div></div></section></div><p class="footer-note">Statut léger actualisé automatiquement, sans rechargement complet.</p>
 </section>
 
-<section class="panel">
-<header class="panel-header"><div class="panel-heading"><span class="eyebrow">Connexion</span><h2>Passerelle Rayobyte</h2><p>Le secret reste uniquement dans le stockage éphémère du service.</p></div></header>
-<div class="panel-body"><form id="gateway-form"><div class="form-grid"><div class="wide"><label for="gateway">Passerelle rotative</label><input id="gateway" name="gateway" type="password" autocomplete="off" placeholder="username:password@host:port" required></div></div><div class="form-actions"><button data-config type="submit">Enregistrer la passerelle</button></div></form></div>
+<section class="app-page" data-page="targets" aria-label="Cibles">
+<div class="page-head"><span class="eyebrow">Cibles</span><h1>Bibliothèque d’URL</h1><p>Ajoutez, modifiez et choisissez les URL utilisées lors de chaque lancement.</p></div>
+<section class="panel"><header class="panel-head"><div><h2 id="target-form-title">Nouvelle cible</h2><p>Un pseudo permet de reconnaître rapidement chaque URL.</p></div><span id="target-count" class="count">__TARGET_COUNT__ cible(s)</span></header><div class="panel-body"><form id="target-form"><input id="target-id" type="hidden"><div class="form-grid"><div><label for="target-alias">Pseudo</label><input id="target-alias" maxlength="100" placeholder="Page d’accueil" required></div><div><label for="target-url">URL</label><input id="target-url" type="url" placeholder="https://site.example/page" required></div><div><label for="target-button">Premier libellé</label><input id="target-button" placeholder="Continuer" required></div><div><label for="target-second-button">Second libellé facultatif</label><input id="target-second-button" placeholder="Confirmer"></div></div><div class="check-row"><input id="target-selected" type="checkbox" checked><label for="target-selected">Utiliser lors des prochains lancements</label></div><div class="form-actions"><button data-config id="target-submit" type="submit">Ajouter</button><button data-config id="target-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div class="actions"><button data-config id="targets-all" class="secondary small" type="button">Tout sélectionner</button><button data-config id="targets-none" class="secondary small" type="button">Tout désélectionner</button></div><span id="selected-target-count" class="count">__SELECTED_COUNT__ sélectionnée(s)</span></header><div class="table-wrap"><table><thead><tr><th>Utiliser</th><th>Pseudo</th><th>URL</th><th>Premier libellé</th><th>Second libellé</th><th>Actions</th></tr></thead><tbody id="target-rows"></tbody></table></div></section>
 </section>
 
-<section class="panel" id="targets-panel">
-<header class="panel-header"><div class="panel-heading"><span class="eyebrow">Cibles</span><h2>Bibliothèque d’URL</h2><p>Ajoutez, consultez, modifiez, nommez et sélectionnez les URL utilisées lors des lancements manuels et planifiés.</p></div><span id="target-count" class="count">__TARGET_COUNT__ cible(s)</span></header>
-<div class="panel-body">
-<form id="target-form">
-<input id="target-id" type="hidden">
-<div class="form-grid">
-<div><label for="target-alias">Pseudo</label><input id="target-alias" maxlength="100" placeholder="Page d’accueil" required></div>
-<div><label for="target-url">URL</label><input id="target-url" type="url" placeholder="https://site.example/page" required></div>
-<div><label for="target-button">Premier libellé</label><input id="target-button" placeholder="Continuer" required></div>
-<div><label for="target-second-button">Second libellé facultatif</label><input id="target-second-button" placeholder="Confirmer"></div>
-</div>
-<div class="check-row"><input id="target-selected" type="checkbox" checked><label for="target-selected">Utiliser cette cible lors des prochains lancements</label></div>
-<div class="form-actions"><button data-config id="target-submit" type="submit">Ajouter la cible</button><button data-config id="target-cancel" class="secondary" type="button" hidden>Annuler</button></div>
-</form>
-</div>
-<div class="panel-header"><div class="actions"><button data-config id="targets-all" class="secondary small" type="button">Tout sélectionner</button><button data-config id="targets-none" class="secondary small" type="button">Tout désélectionner</button></div><span id="selected-target-count" class="count">__SELECTED_COUNT__ sélectionnée(s)</span></div>
-<div class="table-wrap"><table><thead><tr><th>Utiliser</th><th>Pseudo</th><th>URL</th><th>Premier libellé</th><th>Second libellé</th><th>Actions</th></tr></thead><tbody id="target-rows"></tbody></table></div>
+<section class="app-page" data-page="gateways" aria-label="Passerelles">
+<div class="page-head"><span class="eyebrow">Réseau</span><h1>Passerelles Rayobyte</h1><p>Les pseudos persistent dans Supabase. Les identifiants restent protégés dans un fichier éphémère privé et doivent être ressaisis après un redéploiement.</p></div>
+<section class="panel"><header class="panel-head"><div><h2 id="gateway-form-title">Nouvelle passerelle</h2><p>Une seule passerelle peut être active à la fois.</p></div><span id="gateway-count" class="count">0 passerelle</span></header><div class="panel-body"><form id="gateway-form"><input id="gateway-id" type="hidden"><div class="form-grid"><div><label for="gateway-alias">Pseudo</label><input id="gateway-alias" maxlength="100" placeholder="Rayobyte principale" required></div><div><label for="gateway-secret">Identifiants</label><input id="gateway-secret" type="password" autocomplete="off" placeholder="username:password@host:port"></div></div><div class="check-row"><input id="gateway-active" type="checkbox"><label for="gateway-active">Définir comme passerelle active</label></div><p class="hint">En modification, laissez les identifiants vides pour conserver la valeur éphémère actuelle.</p><div class="form-actions"><button data-config id="gateway-submit" type="submit">Ajouter</button><button data-config id="gateway-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div><h2>Passerelles enregistrées</h2><p>Réactivez les entrées marquées « identifiants manquants » après un redéploiement.</p></div></header><div class="table-wrap"><table><thead><tr><th>Active</th><th>Pseudo</th><th>Identifiants</th><th>Actions</th></tr></thead><tbody id="gateway-rows"></tbody></table></div></section>
 </section>
 
-<div class="content-grid">
-<section class="panel"><header class="panel-header"><div class="panel-heading"><span class="eyebrow">Paramètres</span><h2>Répétitions et planification</h2><p>La sélection de cibles ci-dessus est persistante.</p></div></header><div class="panel-body">
-<form id="settings-form">
-<label>Mode de répétition</label>
-<div class="mode-options">
-<label class="mode-option"><input type="radio" name="execution_mode" value="fixed" __FIXED_CHECKED__><span>Nombre fixe<small>Valeur exacte.</small></span></label>
-<label class="mode-option"><input type="radio" name="execution_mode" value="range" __RANGE_CHECKED__><span>Intervalle<small>Total tiré min/max.</small></span></label>
-<label class="mode-option"><input type="radio" name="execution_mode" value="continuous" __CONTINUOUS_CHECKED__><span>Continu<small>Cycles de cinq minutes.</small></span></label>
-</div>
-<div class="repeat-fields"><div><label for="repetition-count">Nombre fixe</label><input id="repetition-count" type="number" min="1" max="10000" value="__REPETITION_COUNT__"></div><div><label for="repetition-min">Minimum</label><input id="repetition-min" type="number" min="1" max="10000" value="__REPETITION_MIN__"></div><div><label for="repetition-max">Maximum</label><input id="repetition-max" type="number" min="1" max="10000" value="__REPETITION_MAX__"></div></div>
-<div style="margin-top:12px"><label for="interval-minutes">Intervalle planifié en minutes</label><input id="interval-minutes" type="number" min="60" max="10080" value="__INTERVAL__"></div>
-<div class="check-row"><input id="schedule-enabled" type="checkbox" __SCHEDULE_CHECKED__><label for="schedule-enabled">Activer la planification</label></div>
-<div class="form-actions"><button data-config type="submit">Enregistrer les paramètres</button></div>
-</form></div></section>
-<section class="panel"><header class="panel-header"><div class="panel-heading"><span class="eyebrow">Exécution</span><h2>Lancer le scénario</h2><p>Seules les cibles cochées sont utilisées.</p></div></header><div class="panel-body"><dl class="run-specs"><div><dt>Cibles choisies</dt><dd id="run-selected-count">__SELECTED_COUNT__</dd></div><div><dt>Fermeture navigateur</dt><dd>Après chaque visite</dd></div><div><dt>Mise à jour</dt><dd>Sans rechargement de page</dd></div></dl><div class="actions"><button id="run-button" type="button">Lancer maintenant</button><button id="stop-button" class="danger" type="button" disabled>Arrêter</button><a class="button secondary" href="/results.csv">Télécharger le CSV</a></div><p class="hint" style="margin:14px 0 0">Le statut et les résultats sont actualisés automatiquement pendant l’exécution.</p></div></section>
-</div>
+<section class="app-page" data-page="results" aria-label="Résultats">
+<div class="page-head"><span class="eyebrow">Historique</span><h1>Résultats Supabase</h1><p>Consultez et supprimez les visites directement depuis l’application.</p></div>
+<section class="panel"><header class="panel-head"><div class="actions"><button id="delete-selected-results" class="danger small" type="button" disabled>Supprimer la sélection</button><button id="clear-results" class="danger small" type="button">Tout effacer</button><a class="button secondary small" href="/results.csv">Télécharger le CSV</a></div><span id="result-count" class="count">0 visite</span></header><div class="table-wrap"><table><thead><tr><th><input id="select-all-results" type="checkbox" aria-label="Tout sélectionner"></th><th>Date</th><th>Pseudo</th><th>Source</th><th>Répétition</th><th>URL initiale</th><th>URL finale</th><th>Résultat</th><th>Erreur</th><th>Actions</th></tr></thead><tbody id="result-rows"></tbody></table></div></section>
+</section>
 
-<section class="panel"><header class="panel-header"><div class="panel-heading"><span class="eyebrow">Historique</span><h2>Résultats Supabase</h2><p>Supprimez une visite, une sélection, une exécution ou tout l’historique.</p></div><span id="result-count" class="count">0 visite</span></header><div class="panel-body actions"><button id="delete-selected-results" class="danger small" type="button" disabled>Supprimer la sélection</button><button id="clear-results" class="danger small" type="button">Tout effacer</button></div><div class="table-wrap"><table><thead><tr><th><input id="select-all-results" type="checkbox" aria-label="Tout sélectionner"></th><th>Date</th><th>Pseudo</th><th>Source</th><th>Répétition</th><th>URL initiale</th><th>URL finale</th><th>Résultat</th><th>Erreur</th><th>Actions</th></tr></thead><tbody id="result-rows"></tbody></table></div></section>
-<footer class="footer">Ghost Clicker · Interface d’administration dynamique</footer>
-</main>
+<section class="app-page" data-page="settings" aria-label="Réglages">
+<div class="page-head"><span class="eyebrow">Réglages</span><h1>Exécution et planification</h1><p>Configurez les répétitions et les lancements automatiques.</p></div>
+<section class="panel"><header class="panel-head"><div><h2>Mode d’exécution</h2><p>La sélection des URL et de la passerelle est gérée dans leurs onglets.</p></div></header><div class="panel-body"><form id="settings-form"><label>Mode de répétition</label><div class="mode-options"><label class="mode-option"><input type="radio" name="execution_mode" value="fixed" __FIXED_CHECKED__><span>Nombre fixe<small>Valeur exacte.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="range" __RANGE_CHECKED__><span>Intervalle<small>Total tiré min/max.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="continuous" __CONTINUOUS_CHECKED__><span>Continu<small>Cycles de cinq minutes.</small></span></label></div><div class="repeat-fields"><div><label for="repetition-count">Nombre fixe</label><input id="repetition-count" type="number" min="1" max="10000" value="__REPETITION_COUNT__"></div><div><label for="repetition-min">Minimum</label><input id="repetition-min" type="number" min="1" max="10000" value="__REPETITION_MIN__"></div><div><label for="repetition-max">Maximum</label><input id="repetition-max" type="number" min="1" max="10000" value="__REPETITION_MAX__"></div></div><div style="margin-top:12px"><label for="interval-minutes">Intervalle planifié en minutes</label><input id="interval-minutes" type="number" min="60" max="10080" value="__INTERVAL__"></div><div class="check-row"><input id="schedule-enabled" type="checkbox" __SCHEDULE_CHECKED__><label for="schedule-enabled">Activer la planification</label></div><div class="form-actions"><button data-config type="submit">Enregistrer les réglages</button></div></form></div></section>
+</section>
+</div></main>
+
+<nav class="bottom-nav" aria-label="Navigation principale">
+<button class="nav-item active" data-nav="home" type="button" aria-label="Accueil"><svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"></path><path d="M5 10v10h14V10"></path><path d="M9 20v-6h6v6"></path></svg><span>Accueil</span></button>
+<button class="nav-item" data-nav="targets" type="button" aria-label="URL"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"></path><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"></path></svg><span>URL</span></button>
+<button class="nav-item" data-nav="gateways" type="button" aria-label="Passerelles"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><path d="M7 7h.01M7 17h.01M17 7h2M17 17h2"></path></svg><span>Passerelles</span></button>
+<button class="nav-item" data-nav="results" type="button" aria-label="Résultats"><svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"></path></svg><span>Résultats</span></button>
+<button class="nav-item" data-nav="settings" type="button" aria-label="Réglages"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg><span>Réglages</span></button>
+</nav>
 <script>
 const csrfToken=__CSRF_JSON__;
 let targets=__TARGETS_JSON__;
+let gateways=__GATEWAYS_JSON__;
 let reports=__REPORTS_JSON__;
 let runState=__RUN_STATE_JSON__;
 let databaseState=__DATABASE_STATE_JSON__;
-let gatewayReady=__GATEWAY_READY__;
 const notices=document.getElementById('notices');
-
-function showNotice(message,isError=false){const node=document.createElement('div');node.className='notice'+(isError?' error':'');node.textContent=message;notices.replaceChildren(node);window.setTimeout(()=>{if(node.isConnected)node.remove()},7000)}
-async function api(url,{method='GET',body=null}={}){const options={method,headers:{'Accept':'application/json'}};if(method!=='GET')options.headers['X-CSRF-Token']=csrfToken;if(body!==null){options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}const response=await fetch(url,options);let value;try{value=await response.json()}catch{throw new Error('Réponse serveur invalide.')}if(!response.ok||!value.ok)throw new Error(value.error||'Opération impossible.');return value}
-function cell(text,className=''){const node=document.createElement('td');node.textContent=text??'';if(className)node.className=className;return node}
-function actionButton(label,className,handler){const node=document.createElement('button');node.type='button';node.className=(className||'secondary')+' small';node.textContent=label;node.addEventListener('click',handler);return node}
-function resetTargetForm(){document.getElementById('target-form').reset();document.getElementById('target-id').value='';document.getElementById('target-selected').checked=true;document.getElementById('target-submit').textContent='Ajouter la cible';document.getElementById('target-cancel').hidden=true}
-function editTarget(target){document.getElementById('target-id').value=target.id;document.getElementById('target-alias').value=target.alias;document.getElementById('target-url').value=target.url;document.getElementById('target-button').value=target.button_text;document.getElementById('target-second-button').value=target.second_button_text||'';document.getElementById('target-selected').checked=target.selected;document.getElementById('target-submit').textContent='Enregistrer les modifications';document.getElementById('target-cancel').hidden=false;document.getElementById('target-alias').focus()}
-function renderTargets(){const body=document.getElementById('target-rows');body.replaceChildren();const selected=targets.filter(item=>item.selected).length;document.getElementById('target-count').textContent=`${targets.length} cible(s)`;document.getElementById('selected-target-count').textContent=`${selected} sélectionnée(s)`;document.getElementById('selected-count-card').textContent=`${selected} / ${targets.length}`;document.getElementById('run-selected-count').textContent=String(selected);if(!targets.length){const row=document.createElement('tr');const empty=cell('Aucune cible. Ajoutez votre première URL ci-dessus.','empty');empty.colSpan=6;row.append(empty);body.append(row);renderRun();return}for(const target of targets){const row=document.createElement('tr');if(target.selected)row.className='target-selected';const selectCell=document.createElement('td');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=Boolean(target.selected);checkbox.disabled=Boolean(runState.running);checkbox.setAttribute('aria-label',`Utiliser ${target.alias}`);checkbox.addEventListener('change',async()=>{try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'PATCH',body:{selected:checkbox.checked}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){checkbox.checked=!checkbox.checked;showNotice(error.message,true)}});selectCell.append(checkbox);row.append(selectCell,cell(target.alias),cell(target.url,'url-cell'),cell(target.button_text),cell(target.second_button_text||'—'));const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Modifier','secondary',()=>editTarget(target)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la cible « ${target.alias} » ?`))return;try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'DELETE'});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(actions);body.append(row)}renderRun()}
-function renderRun(){const running=Boolean(runState.running);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}const status=document.getElementById('run-status');status.lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+(running?'running':'idle');const selected=targets.filter(item=>item.selected).length;document.getElementById('run-button').disabled=running||selected===0;document.getElementById('stop-button').disabled=!running||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=running});document.querySelectorAll('#target-rows input,#target-rows button').forEach(node=>{node.disabled=running});document.querySelectorAll('#result-rows input,#result-rows button,#select-all-results,#clear-results').forEach(node=>{node.disabled=running});if(!running)updateResultSelection()}
-function renderConnection(){document.getElementById('gateway-status').textContent=gatewayReady?'Configurée':'Absente';document.getElementById('gateway-dot').className='status-dot '+(gatewayReady?'ready':'warning');let label='Cache local',css='warning';if(databaseState.connected){label='Supabase connectée';css='ready'}else if(databaseState.configured){label='Connexion requise'}document.getElementById('database-status').textContent=label;document.getElementById('database-dot').className='status-dot '+css}
+const pages=['home','targets','gateways','results','settings'];
+const pageLabels={home:'Accueil',targets:'URL',gateways:'Passerelles',results:'Résultats',settings:'Réglages'};
+let activePage='home';
+function showNotice(message,isError=false){const node=document.createElement('div');node.className='notice'+(isError?' error':'');node.textContent=message;notices.replaceChildren(node);window.setTimeout(()=>{if(node.isConnected)node.remove()},6500)}
+async function api(url,{method='GET',body=null}={}){const options={method,headers:{Accept:'application/json'}};if(method!=='GET')options.headers['X-CSRF-Token']=csrfToken;if(body!==null){options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}const response=await fetch(url,options);let value;try{value=await response.json()}catch{throw new Error('Réponse serveur invalide.')}if(!response.ok||!value.ok)throw new Error(value.error||'Opération impossible.');return value}
+function goToPage(name,updateHash=true){const index=pages.indexOf(name);if(index<0)return;activePage=name;document.getElementById('app-track').style.transform=`translateX(-${index*100}%)`;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.nav===name));document.querySelectorAll('.app-page').forEach(node=>{const hidden=node.dataset.page!==name;node.setAttribute('aria-hidden',String(hidden));node.inert=hidden});document.getElementById('page-title').textContent=pageLabels[name];if(updateHash)history.replaceState(null,'',`#${name}`)}
+document.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.nav)));document.querySelectorAll('[data-go]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.go)));window.addEventListener('hashchange',()=>goToPage(location.hash.slice(1)||'home',false));
+let touchStartX=0;document.getElementById('app-track').addEventListener('touchstart',event=>{touchStartX=event.changedTouches[0].screenX},{passive:true});document.getElementById('app-track').addEventListener('touchend',event=>{const delta=event.changedTouches[0].screenX-touchStartX;if(Math.abs(delta)<60)return;const index=pages.indexOf(activePage)+(delta<0?1:-1);if(index>=0&&index<pages.length)goToPage(pages[index])},{passive:true});
+function cell(text,className=''){const node=document.createElement('td');node.textContent=text??'';if(className)node.className=className;return node}function actionButton(label,className,handler){const node=document.createElement('button');node.type='button';node.className=(className||'secondary')+' small';node.textContent=label;node.addEventListener('click',handler);return node}
+function resetTargetForm(){document.getElementById('target-form').reset();document.getElementById('target-id').value='';document.getElementById('target-selected').checked=true;document.getElementById('target-form-title').textContent='Nouvelle cible';document.getElementById('target-submit').textContent='Ajouter';document.getElementById('target-cancel').hidden=true}
+function editTarget(target){document.getElementById('target-id').value=target.id;document.getElementById('target-alias').value=target.alias;document.getElementById('target-url').value=target.url;document.getElementById('target-button').value=target.button_text;document.getElementById('target-second-button').value=target.second_button_text||'';document.getElementById('target-selected').checked=target.selected;document.getElementById('target-form-title').textContent='Modifier la cible';document.getElementById('target-submit').textContent='Enregistrer';document.getElementById('target-cancel').hidden=false;goToPage('targets');document.getElementById('target-alias').focus()}
+function renderTargets(){const body=document.getElementById('target-rows');body.replaceChildren();const selected=targets.filter(item=>item.selected).length;document.getElementById('target-count').textContent=`${targets.length} cible(s)`;document.getElementById('selected-target-count').textContent=`${selected} sélectionnée(s)`;document.getElementById('selected-count-card').textContent=`${selected} / ${targets.length}`;document.getElementById('run-selected-count').textContent=String(selected);if(!targets.length){const row=document.createElement('tr');const empty=cell('Aucune cible.','empty');empty.colSpan=6;row.append(empty);body.append(row);renderRun();return}for(const target of targets){const row=document.createElement('tr');if(target.selected)row.className='target-selected';const selectCell=document.createElement('td');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=Boolean(target.selected);checkbox.disabled=Boolean(runState.running);checkbox.addEventListener('change',async()=>{try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'PATCH',body:{selected:checkbox.checked}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){checkbox.checked=!checkbox.checked;showNotice(error.message,true)}});selectCell.append(checkbox);row.append(selectCell,cell(target.alias),cell(target.url,'url-cell'),cell(target.button_text),cell(target.second_button_text||'—'));const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Modifier','secondary',()=>editTarget(target)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la cible « ${target.alias} » ?`))return;try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'DELETE'});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(actions);body.append(row)}renderRun()}
+function resetGatewayForm(){document.getElementById('gateway-form').reset();document.getElementById('gateway-id').value='';document.getElementById('gateway-secret').required=true;document.getElementById('gateway-active').disabled=false;document.getElementById('gateway-form-title').textContent='Nouvelle passerelle';document.getElementById('gateway-submit').textContent='Ajouter';document.getElementById('gateway-cancel').hidden=true}
+function editGateway(gateway){document.getElementById('gateway-id').value=gateway.id;document.getElementById('gateway-alias').value=gateway.alias;document.getElementById('gateway-secret').value='';document.getElementById('gateway-secret').required=false;document.getElementById('gateway-active').checked=gateway.active;document.getElementById('gateway-active').disabled=gateway.active;document.getElementById('gateway-form-title').textContent='Modifier la passerelle';document.getElementById('gateway-submit').textContent='Enregistrer';document.getElementById('gateway-cancel').hidden=false;goToPage('gateways');document.getElementById('gateway-alias').focus()}
+function renderGateways(){const body=document.getElementById('gateway-rows');body.replaceChildren();document.getElementById('gateway-count').textContent=`${gateways.length} passerelle(s)`;if(!gateways.length){const row=document.createElement('tr');const empty=cell('Aucune passerelle.','empty');empty.colSpan=4;row.append(empty);body.append(row);renderConnection();return}for(const gateway of gateways){const row=document.createElement('tr');if(gateway.active)row.className='gateway-active';const activeCell=document.createElement('td');const active=document.createElement('span');active.className='badge '+(gateway.active?'active-badge':'');active.textContent=gateway.active?'ACTIVE':'—';activeCell.append(active);const statusCell=document.createElement('td');const status=document.createElement('span');status.className='badge '+(gateway.configured?'success':'missing-badge');status.textContent=gateway.configured?'DISPONIBLES':'MANQUANTS';statusCell.append(status);const actions=document.createElement('td');actions.className='row-actions';if(!gateway.active)actions.append(actionButton('Activer','secondary',async()=>{try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}/select`,{method:'POST',body:{}});gateways=value.gateways;renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));actions.append(actionButton('Modifier','secondary',()=>editGateway(gateway)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la passerelle « ${gateway.alias} » ?`))return;try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}`,{method:'DELETE'});gateways=value.gateways;resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(activeCell,cell(gateway.alias),statusCell,actions);body.append(row)}renderConnection();renderRun()}
+function renderConnection(){const active=gateways.find(item=>item.active);const ready=Boolean(active&&active.configured);document.getElementById('gateway-status').textContent=active?(ready?active.alias:`${active.alias} · identifiants manquants`):'Absente';document.getElementById('gateway-dot').className='status-dot '+(ready?'ready':'warning');document.getElementById('run-gateway-name').textContent=active?active.alias:'Aucune';let label='Cache local',css='warning';if(databaseState.connected){label='Supabase connectée';css='ready'}else if(databaseState.configured){label='Connexion requise'}document.getElementById('database-status').textContent=label;document.getElementById('database-dot').className='status-dot '+css}
+function renderRun(){const running=Boolean(runState.running);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}document.getElementById('run-status').lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+(running?'running':'idle');const selected=targets.filter(item=>item.selected).length;const active=gateways.find(item=>item.active&&item.configured);document.getElementById('run-button').disabled=running||selected===0||!active;document.getElementById('stop-button').disabled=!running||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=running});document.querySelectorAll('#target-rows input,#target-rows button,#gateway-rows button').forEach(node=>{node.disabled=running});document.querySelectorAll('#result-rows input,#result-rows button,#select-all-results,#clear-results').forEach(node=>{node.disabled=running});if(!running)updateResultSelection()}
 function resultLabel(report,result){if(report.execution_mode==='continuous')return `cycle ${result.continuous_window||''} · ${result.window_repetition_count||''}`;return `${result.repetition||''} / ${report.repetition_count??''}`}
 function renderReports(){const body=document.getElementById('result-rows');body.replaceChildren();let count=0;for(const report of [...reports].reverse()){const runId=String(report.run_id||'');for(const result of [...(report.results||[])].reverse()){count++;const row=document.createElement('tr');const selectCell=document.createElement('td');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='result-selector';checkbox.dataset.runId=runId;checkbox.dataset.visitNumber=String(result.visit_number||'');checkbox.addEventListener('change',updateResultSelection);selectCell.append(checkbox);const source=String(report.source||'')+(report.in_progress?' · EN COURS':'');const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(result.success?'success':'failure');badge.textContent=result.success?'SUCCÈS':'ÉCHEC';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Visite','danger',()=>deleteVisits([{run_id:runId,visit_number:Number(result.visit_number)}])),actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(result.started_at||''),cell(result.target_alias||result.target_id||'—'),cell(source),cell(resultLabel(report,result)),cell(result.initial_url||'','url-cell'),cell(result.final_url||'','url-cell'),outcome,cell(result.error||'','url-cell'),actions);body.append(row)}}if(!count){const row=document.createElement('tr');const empty=cell('Aucun résultat.','empty');empty.colSpan=10;row.append(empty);body.append(row)}document.getElementById('result-count').textContent=`${count} visite(s)`;document.getElementById('select-all-results').checked=false;updateResultSelection()}
 function updateResultSelection(){const selected=document.querySelectorAll('.result-selector:checked').length;document.getElementById('delete-selected-results').disabled=selected===0}
-async function deleteVisits(visits){if(!visits.length||!confirm(`Supprimer ${visits.length} visite(s) ?`))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits,run_ids:[]}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}
-async function deleteRuns(runIds){if(!runIds.length||!confirm('Supprimer toute cette exécution et ses visites ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits:[],run_ids:runIds}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}
-async function refreshState(){try{const value=await api('/api/state');runState=value.run;databaseState=value.database;gatewayReady=value.gateway_ready;reports=value.reports;if(!document.getElementById('target-id').value)targets=value.targets;renderTargets();renderReports();renderConnection();renderRun()}catch(error){showNotice(error.message,true)}}
-
-document.getElementById('gateway-form').addEventListener('submit',async event=>{event.preventDefault();try{const value=await api('/api/gateway',{method:'POST',body:{gateway:document.getElementById('gateway').value}});gatewayReady=true;document.getElementById('gateway').value='';renderConnection();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-document.getElementById('target-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('target-id').value;const payload={alias:document.getElementById('target-alias').value,url:document.getElementById('target-url').value,button_text:document.getElementById('target-button').value,second_button_text:document.getElementById('target-second-button').value,selected:document.getElementById('target-selected').checked};try{const value=await api(id?`/api/targets/${encodeURIComponent(id)}`:'/api/targets',{method:id?'PATCH':'POST',body:payload});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-document.getElementById('target-cancel').addEventListener('click',resetTargetForm);
-for(const [id,mode] of [['targets-all','all'],['targets-none','none']])document.getElementById(id).addEventListener('click',async()=>{try{const value=await api('/api/targets/selection',{method:'POST',body:{mode}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
+async function deleteVisits(visits){if(!visits.length||!confirm(`Supprimer ${visits.length} visite(s) ?`))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits,run_ids:[]}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}async function deleteRuns(runIds){if(!runIds.length||!confirm('Supprimer toute cette exécution et ses visites ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits:[],run_ids:runIds}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}
+async function refreshState(){try{const value=await api('/api/state');runState=value.run;databaseState=value.database;reports=value.reports;gateways=value.gateways;if(!document.getElementById('target-id').value)targets=value.targets;renderTargets();renderGateways();renderReports();renderConnection();renderRun()}catch(error){showNotice(error.message,true)}}
+document.getElementById('target-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('target-id').value;const payload={alias:document.getElementById('target-alias').value,url:document.getElementById('target-url').value,button_text:document.getElementById('target-button').value,second_button_text:document.getElementById('target-second-button').value,selected:document.getElementById('target-selected').checked};try{const value=await api(id?`/api/targets/${encodeURIComponent(id)}`:'/api/targets',{method:id?'PATCH':'POST',body:payload});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('target-cancel').addEventListener('click',resetTargetForm);for(const [id,mode] of [['targets-all','all'],['targets-none','none']])document.getElementById(id).addEventListener('click',async()=>{try{const value=await api('/api/targets/selection',{method:'POST',body:{mode}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
+document.getElementById('gateway-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('gateway-id').value;const wantsActive=document.getElementById('gateway-active').checked;const payload={alias:document.getElementById('gateway-alias').value,gateway:document.getElementById('gateway-secret').value,active:wantsActive};try{let value=await api(id?`/api/gateways/${encodeURIComponent(id)}`:'/api/gateways',{method:id?'PATCH':'POST',body:payload});gateways=value.gateways;if(id&&wantsActive&&!gateways.find(item=>item.id===id)?.active){value=await api(`/api/gateways/${encodeURIComponent(id)}/select`,{method:'POST',body:{}});gateways=value.gateways}resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('gateway-cancel').addEventListener('click',resetGatewayForm);
 document.getElementById('settings-form').addEventListener('submit',async event=>{event.preventDefault();const payload={execution_mode:document.querySelector('input[name="execution_mode"]:checked').value,repetition_count:Number(document.getElementById('repetition-count').value),repetition_min:Number(document.getElementById('repetition-min').value),repetition_max:Number(document.getElementById('repetition-max').value),interval_minutes:Number(document.getElementById('interval-minutes').value),schedule_enabled:document.getElementById('schedule-enabled').checked};try{const value=await api('/api/settings',{method:'POST',body:payload});showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-document.getElementById('run-button').addEventListener('click',async()=>{try{const value=await api('/api/run',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
-document.getElementById('stop-button').addEventListener('click',async()=>{try{const value=await api('/api/stop',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
-document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});
-document.getElementById('delete-selected-results').addEventListener('click',()=>{const visits=[...document.querySelectorAll('.result-selector:checked')].map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));deleteVisits(visits)});
-document.getElementById('clear-results').addEventListener('click',async()=>{if(!confirm('Effacer définitivement tout l’historique Supabase ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'all'}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-
+document.getElementById('run-button').addEventListener('click',async()=>{try{const value=await api('/api/run',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});document.getElementById('stop-button').addEventListener('click',async()=>{try{const value=await api('/api/stop',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
+document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});document.getElementById('delete-selected-results').addEventListener('click',()=>{const visits=[...document.querySelectorAll('.result-selector:checked')].map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));deleteVisits(visits)});document.getElementById('clear-results').addEventListener('click',async()=>{if(!confirm('Effacer définitivement tout l’historique Supabase ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'all'}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
 let pollInProgress=false;async function pollStatus(){if(pollInProgress)return;pollInProgress=true;try{const value=await api('/api/status');const wasRunning=Boolean(runState.running);runState=value.run;renderRun();if(runState.running||wasRunning)await refreshState()}catch(error){showNotice(error.message,true)}finally{pollInProgress=false}}
-renderTargets();renderReports();renderConnection();renderRun();
-window.setInterval(pollStatus,3000);
+renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetGatewayForm();goToPage(pages.includes(location.hash.slice(1))?location.hash.slice(1):'home',false);window.setInterval(pollStatus,3000);
 </script>
 </body>
 </html>"""
@@ -1672,17 +2037,15 @@ window.setInterval(pollStatus,3000);
         ),
         "__CSRF_JSON__": script_json(CSRF_TOKEN),
         "__TARGETS_JSON__": script_json(targets),
+        "__GATEWAYS_JSON__": script_json(gateways),
         "__REPORTS_JSON__": script_json(reports),
         "__RUN_STATE_JSON__": script_json(state),
         "__DATABASE_STATE_JSON__": script_json(database_state),
-        "__GATEWAY_READY__": "true" if proxy_gateway_file_path().exists() else "false",
     }
     marker_pattern = re.compile(
         "|".join(re.escape(marker) for marker in replacements)
     )
-    return marker_pattern.sub(
-        lambda match: replacements[match.group(0)], page
-    )
+    return marker_pattern.sub(lambda match: replacements[match.group(0)], page)
 
 
 scheduler = threading.Thread(target=scheduler_loop, daemon=True)
