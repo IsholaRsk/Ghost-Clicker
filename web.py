@@ -46,6 +46,8 @@ CSRF_TOKEN = secrets.token_urlsafe(32)
 STATE_LOCK = threading.Lock()
 REPORTS_LOCK = threading.Lock()
 DATABASE_LOCK = threading.Lock()
+GATEWAY_SECRETS_LOCK = threading.RLock()
+GATEWAY_SECRETS_CACHE: dict[str, str] | None = None
 STOP_EVENT = threading.Event()
 DATABASE_STATE: dict[str, Any] = {
     "configured": False,
@@ -200,7 +202,19 @@ def atomic_write_private_text(path: Path, value: str) -> None:
                 pass
 
 
-def read_gateway_secrets() -> dict[str, str]:
+def normalized_gateway_secrets(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): secret.strip()
+        for key, secret in value.items()
+        if SAFE_IDENTIFIER_PATTERN.fullmatch(str(key))
+        and isinstance(secret, str)
+        and 0 < len(secret.strip()) <= 4_096
+    }
+
+
+def read_local_gateway_secrets() -> dict[str, str]:
     path = proxy_gateways_file_path()
     if not path.exists():
         return {}
@@ -208,21 +222,86 @@ def read_gateway_secrets() -> dict[str, str]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    if not isinstance(value, dict):
-        return {}
-    return {
-        str(key): str(secret)
-        for key, secret in value.items()
-        if SAFE_IDENTIFIER_PATTERN.fullmatch(str(key))
-        and isinstance(secret, str)
-    }
+    return normalized_gateway_secrets(value)
 
 
-def write_gateway_secrets(value: dict[str, str]) -> None:
+def write_local_gateway_secrets(value: dict[str, str]) -> None:
     atomic_write_private_text(
         proxy_gateways_file_path(),
         json.dumps(value, ensure_ascii=False, indent=2),
     )
+
+
+def read_gateway_secrets() -> dict[str, str]:
+    """Charge Vault et conserve un cache privé pour l'exécution du navigateur."""
+
+    global GATEWAY_SECRETS_CACHE
+    with GATEWAY_SECRETS_LOCK:
+        if GATEWAY_SECRETS_CACHE is not None:
+            return dict(GATEWAY_SECRETS_CACHE)
+        local_secrets = read_local_gateway_secrets()
+        storage = supabase_storage()
+        if storage is not None:
+            try:
+                persistent_secrets = normalized_gateway_secrets(
+                    storage.load_gateway_secrets()
+                )
+                merged_secrets = {**persistent_secrets, **local_secrets}
+                if merged_secrets != persistent_secrets:
+                    storage.save_gateway_secrets(merged_secrets)
+                database_success()
+                GATEWAY_SECRETS_CACHE = merged_secrets
+                try:
+                    write_local_gateway_secrets(merged_secrets)
+                except ConfigurationError:
+                    # Vault reste la source durable ; ce cache est facultatif.
+                    pass
+                return dict(merged_secrets)
+            except StorageError as exc:
+                database_failure(exc)
+        if not (
+            os.getenv("SUPABASE_URL", "").strip()
+            or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+        ):
+            GATEWAY_SECRETS_CACHE = local_secrets
+        return dict(local_secrets)
+
+
+def write_gateway_secrets(value: dict[str, str]) -> None:
+    """Enregistre dans Vault avant de mettre à jour le cache privé local."""
+
+    global GATEWAY_SECRETS_CACHE
+    normalized = normalized_gateway_secrets(value)
+    if len(normalized) != len(value):
+        raise ConfigurationError("Le registre de passerelles est invalide.")
+    with GATEWAY_SECRETS_LOCK:
+        storage = supabase_storage()
+        database_requested = bool(
+            os.getenv("SUPABASE_URL", "").strip()
+            or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+        )
+        if storage is None and database_requested:
+            raise ConfigurationError(
+                "Impossible de conserver les passerelles dans Supabase."
+            )
+        if storage is not None:
+            try:
+                storage.save_gateway_secrets(normalized)
+                database_success()
+            except StorageError as exc:
+                database_failure(exc)
+                raise ConfigurationError(
+                    "Impossible de conserver les passerelles dans Supabase."
+                ) from exc
+            GATEWAY_SECRETS_CACHE = dict(normalized)
+            try:
+                write_local_gateway_secrets(normalized)
+            except ConfigurationError:
+                # L'absence du cache local ne remet pas en cause Vault.
+                pass
+            return
+        write_local_gateway_secrets(normalized)
+        GATEWAY_SECRETS_CACHE = dict(normalized)
 
 
 def bounded_integer(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -1942,28 +2021,28 @@ def home() -> str:
 <meta name="theme-color" content="#0d0f12">
 <title>Ghost Clicker</title>
 <style>
-:root{color-scheme:dark;--canvas:#0d0f12;--surface:#15181c;--soft:#1a1e23;--ink:#f2f4f7;--muted:#9ba3ad;--line:#292e35;--strong:#3c434d;--success:#58c68a;--success-bg:#14271d;--warning:#f0b84b;--danger:#ff8b81;--danger-bg:#2b1818;--focus:#7e9cc8;--nav-h:72px;--top-h:58px}
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--canvas)}body{color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}button,input,select{font:inherit}a{color:inherit}
-.topbar{height:var(--top-h);border-bottom:1px solid var(--line);background:rgba(13,15,18,.94);backdrop-filter:blur(12px);display:flex;align-items:center;position:relative;z-index:20}.topbar-inner{width:min(1100px,calc(100% - 28px));margin:auto;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:10px;font-weight:750}.brand-mark{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--ink);color:var(--canvas);font-size:12px}.page-title{color:var(--muted);font-size:12px;font-weight:700}
-.notices{position:fixed;z-index:50;top:66px;left:50%;transform:translateX(-50%);width:min(620px,calc(100% - 24px));display:grid;gap:7px}.notice{padding:11px 13px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:9px;background:#151d27;color:#c6d2df;box-shadow:0 10px 30px rgba(0,0,0,.25)}.notice.error{border-color:#5c2c2c;border-left-color:var(--danger);background:var(--danger-bg);color:#ffd0cc}
-.app-viewport{height:calc(100dvh - var(--top-h) - var(--nav-h));overflow:hidden}.app-track{height:100%;display:flex;align-items:stretch;transition:transform .32s cubic-bezier(.22,.61,.36,1);will-change:transform}.app-page{flex:0 0 100%;height:100%;overflow-y:auto;overscroll-behavior:contain;padding:18px max(14px,calc((100% - 1100px)/2)) 28px;scrollbar-gutter:stable}.page-head{margin-bottom:16px}.eyebrow{display:block;margin-bottom:6px;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.13em;text-transform:uppercase}h1,h2,p{margin-top:0}h1{margin-bottom:5px;font-size:26px;line-height:1.15;letter-spacing:-.035em}h2{margin:0;font-size:17px;letter-spacing:-.02em}.page-head p,.panel-head p,.hint{color:var(--muted)}.page-head p{margin:0}
-.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}.stat{min-width:0;padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.stat-label{display:block;margin-bottom:6px;color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.stat-value{display:flex;align-items:center;gap:8px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px;font-weight:700}.status-dot{width:8px;height:8px;flex:none;border-radius:50%}.status-dot.idle,.status-dot.ready{background:var(--success)}.status-dot.running{background:#7da6e3;animation:pulse 1.7s infinite}.status-dot.warning{background:var(--warning)}@keyframes pulse{50%{opacity:.35}}
-.panel{margin-bottom:14px;border:1px solid var(--line);border-radius:13px;background:var(--surface);overflow:hidden}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:17px 18px 14px;border-bottom:1px solid var(--line)}.panel-head p{margin:4px 0 0;font-size:12px}.panel-body{padding:18px}.count{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;white-space:nowrap}.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.wide{grid-column:1/-1}
-label{display:block;margin-bottom:5px;color:#c9ced5;font-size:11px;font-weight:700}input,select{width:100%;height:40px;border:1px solid var(--strong);border-radius:9px;background:#101317;color:var(--ink);padding:0 11px;outline:none}input:focus,select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(126,156,200,.13)}input[type=checkbox],input[type=radio]{width:15px;height:15px;padding:0;accent-color:#dce3ec}.check-row{display:flex;align-items:center;gap:8px;margin-top:10px}.check-row label{margin:0}
-button,.button{min-height:38px;border:1px solid var(--ink);border-radius:9px;background:var(--ink);color:#11151a;padding:0 13px;font-size:12px;font-weight:800;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{opacity:.86}button:disabled{cursor:not-allowed;opacity:.4}.secondary{border-color:var(--strong);background:transparent;color:var(--ink)}.danger{border-color:#713b3b;background:var(--danger-bg);color:var(--danger)}.small{min-height:30px;padding:0 9px;font-size:10px}.actions,.form-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.form-actions{margin-top:14px}.badge{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:800}.success{background:var(--success-bg);color:var(--success)}.failure{background:var(--danger-bg);color:var(--danger)}.active-badge{background:#172337;color:#9bbce8}.missing-badge{background:#2a2212;color:var(--warning)}
-.mode-options{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px}.mode-option{display:flex;align-items:flex-start;gap:8px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#121519}.mode-option span{font-size:11px}.mode-option small{display:block;color:var(--muted);font-weight:400}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.run-specs{display:grid;margin:0 0 16px}.run-specs div{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:11px}.run-specs dd{margin:0;text-align:right;font-size:11px;font-weight:700}
-.table-wrap{overflow:auto}table{width:100%;min-width:880px;border-collapse:collapse}th,td{padding:10px 11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:var(--soft);color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}td{font-size:11px}tbody tr:hover{background:#191d22}.url-cell{max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-actions{display:flex;gap:5px}.target-selected,.gateway-active{background:#171d1a}.empty{padding:30px;text-align:center;color:var(--muted)}
-.bottom-nav{height:calc(var(--nav-h) + env(safe-area-inset-bottom));position:fixed;z-index:40;left:0;right:0;bottom:0;padding:6px max(10px,calc((100% - 680px)/2)) env(safe-area-inset-bottom);border-top:1px solid var(--line);background:rgba(17,20,24,.96);backdrop-filter:blur(16px);display:grid;grid-template-columns:repeat(5,1fr);gap:3px}.nav-item{min-width:0;border:0;background:transparent;color:var(--muted);border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:5px 2px;font-size:9px;font-weight:700}.nav-item svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.nav-item.active{color:var(--ink);background:#22272e}.nav-item:hover{opacity:1;background:#1c2026}.footer-note{color:var(--muted);font-size:11px;text-align:center;padding:8px 0}
-@media(max-width:800px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.two-col,.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.mode-options,.repeat-fields{grid-template-columns:1fr}.app-page{padding-left:12px;padding-right:12px}}
-@media(max-width:440px){:root{--nav-h:68px}.page-head{margin-bottom:12px}h1{font-size:23px}.panel-head,.panel-body{padding:14px}.status-grid{gap:7px}.stat{padding:12px}.nav-item span{font-size:8px}}
-@media(prefers-reduced-motion:reduce){.app-track{transition:none}*{animation:none!important}}
+:root{color-scheme:dark;--canvas:#0d0f12;--surface:#15181c;--soft:#1a1e23;--ink:#f2f4f7;--muted:#aeb5bf;--line:#292e35;--strong:#3c434d;--success:#58c68a;--success-bg:#14271d;--warning:#f0b84b;--danger:#ff8b81;--danger-bg:#2b1818;--focus:#7e9cc8;--nav-h:86px;--top-h:68px}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--canvas)}body{color:var(--ink);font:16px/1.6 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}button,input,select{font:inherit}a{color:inherit}
+.topbar{height:var(--top-h);border-bottom:1px solid var(--line);background:rgba(13,15,18,.94);backdrop-filter:blur(12px);display:flex;align-items:center;position:relative;z-index:20}.topbar-inner{width:min(1200px,calc(100% - 32px));margin:auto;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:12px;font-size:18px;font-weight:750}.brand-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:var(--ink);color:var(--canvas);font-size:15px}.page-title{color:var(--muted);font-size:15px;font-weight:700}
+.notices{position:fixed;z-index:50;top:78px;left:50%;transform:translateX(-50%);width:min(700px,calc(100% - 28px));display:grid;gap:8px}.notice{padding:13px 15px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;border-radius:9px;background:#151d27;color:#c6d2df;font-size:15px;box-shadow:0 10px 30px rgba(0,0,0,.25)}.notice.error{border-color:#5c2c2c;border-left-color:var(--danger);background:var(--danger-bg);color:#ffd0cc}
+.app-viewport{height:calc(100dvh - var(--top-h) - var(--nav-h));overflow:hidden}.app-track{height:100%}.app-page{display:none;height:100%;overflow-y:auto;overscroll-behavior:contain;padding:24px max(18px,calc((100% - 1200px)/2)) 34px;scrollbar-gutter:stable}.app-page.active{display:block}.page-head{margin-bottom:20px}.eyebrow{display:block;margin-bottom:7px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1,h2,p{margin-top:0}h1{margin-bottom:7px;font-size:32px;line-height:1.15;letter-spacing:-.035em}h2{margin:0;font-size:22px;letter-spacing:-.02em}.page-head p,.panel-head p,.hint{color:var(--muted)}.page-head p{margin:0;font-size:16px}
+.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{min-width:0;padding:18px;border:1px solid var(--line);border-radius:13px;background:var(--surface)}.stat-label{display:block;margin-bottom:8px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}.stat-value{display:flex;align-items:center;gap:9px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:16px;font-weight:700}.status-dot{width:10px;height:10px;flex:none;border-radius:50%}.status-dot.idle,.status-dot.ready{background:var(--success)}.status-dot.running{background:#7da6e3;animation:pulse 1.7s infinite}.status-dot.warning{background:var(--warning)}@keyframes pulse{50%{opacity:.35}}
+.panel{margin-bottom:18px;border:1px solid var(--line);border-radius:14px;background:var(--surface);overflow:hidden}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:21px 22px 18px;border-bottom:1px solid var(--line)}.panel-head p{margin:6px 0 0;font-size:14px}.panel-body{padding:22px}.count{padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:13px;white-space:nowrap}.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}.wide{grid-column:1/-1}
+label{display:block;margin-bottom:7px;color:#d5dae0;font-size:14px;font-weight:700}input,select{width:100%;height:48px;border:1px solid var(--strong);border-radius:9px;background:#101317;color:var(--ink);padding:0 13px;outline:none}input:focus,select:focus{border-color:var(--focus);box-shadow:0 0 0 3px rgba(126,156,200,.13)}input[type=checkbox],input[type=radio]{width:19px;height:19px;padding:0;accent-color:#dce3ec}.check-row{display:flex;align-items:center;gap:10px;margin-top:13px}.check-row label{margin:0}
+button,.button{min-height:44px;border:1px solid var(--ink);border-radius:9px;background:var(--ink);color:#11151a;padding:0 16px;font-size:14px;font-weight:800;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{opacity:.86}button:disabled{cursor:not-allowed;opacity:.4}.secondary{border-color:var(--strong);background:transparent;color:var(--ink)}.danger{border-color:#713b3b;background:var(--danger-bg);color:var(--danger)}.small{min-height:38px;padding:0 11px;font-size:12px}.actions,.form-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.form-actions{margin-top:18px}.badge{display:inline-block;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:800}.success{background:var(--success-bg);color:var(--success)}.failure{background:var(--danger-bg);color:var(--danger)}.active-badge{background:#172337;color:#9bbce8}.missing-badge{background:#2a2212;color:var(--warning)}
+.mode-options{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-bottom:18px}.mode-option{display:flex;align-items:flex-start;gap:10px;padding:14px;border:1px solid var(--line);border-radius:10px;background:#121519}.mode-option span{font-size:14px}.mode-option small{display:block;color:var(--muted);font-size:13px;font-weight:400}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.run-specs{display:grid;margin:0 0 20px}.run-specs div{display:flex;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:14px}.run-specs dd{margin:0;text-align:right;font-size:14px;font-weight:700}
+.table-wrap{overflow:auto}table{width:100%;min-width:1050px;border-collapse:collapse}th,td{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:var(--soft);color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}td{font-size:14px}tbody tr:hover{background:#191d22}.url-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-actions{display:flex;gap:7px}.target-selected,.gateway-active{background:#171d1a}.empty{padding:36px;text-align:center;color:var(--muted)}
+.bottom-nav{height:calc(var(--nav-h) + env(safe-area-inset-bottom));position:fixed;z-index:40;left:0;right:0;bottom:0;padding:8px max(12px,calc((100% - 760px)/2)) env(safe-area-inset-bottom);border-top:1px solid var(--line);background:rgba(17,20,24,.96);backdrop-filter:blur(16px);display:grid;grid-template-columns:repeat(5,1fr);gap:5px}.nav-item{min-width:0;border:0;background:transparent;color:var(--muted);border-radius:11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:7px 3px;font-size:12px;font-weight:700}.nav-item svg{width:25px;height:25px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.nav-item.active{color:var(--ink);background:#22272e}.nav-item:hover{opacity:1;background:#1c2026}.footer-note{color:var(--muted);font-size:14px;text-align:center;padding:10px 0}
+@media(max-width:800px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.two-col,.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.mode-options,.repeat-fields{grid-template-columns:1fr}.app-page{padding-left:15px;padding-right:15px}}
+@media(max-width:440px){:root{--nav-h:80px;--top-h:64px}.page-head{margin-bottom:16px}h1{font-size:28px}.panel-head,.panel-body{padding:17px}.status-grid{gap:9px}.stat{padding:15px}.nav-item{font-size:11px}.nav-item svg{width:23px;height:23px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
 </head>
 <body>
 <header class="topbar"><div class="topbar-inner"><div class="brand"><span class="brand-mark">G</span><span>Ghost Clicker</span></div><span id="page-title" class="page-title">Accueil</span></div></header>
 <div id="notices" class="notices" aria-live="polite">__MESSAGES__</div>
 <main class="app-viewport"><div id="app-track" class="app-track">
-<section class="app-page" data-page="home" aria-label="Accueil">
+<section class="app-page active" data-page="home" aria-label="Accueil">
 <div class="page-head"><span class="eyebrow">Tableau de bord</span><h1>Vue d’ensemble</h1><p>Lancez le bot et suivez son état en temps réel.</p></div>
 <div class="status-grid"><article class="stat"><span class="stat-label">Exécution</span><p id="run-status" class="stat-value"><span id="run-dot" class="status-dot idle"></span>En attente</p></article><article class="stat"><span class="stat-label">Base de données</span><p class="stat-value"><span id="database-dot" class="status-dot __DATABASE_CLASS__"></span><span id="database-status">__DATABASE_STATUS__</span></p></article><article class="stat"><span class="stat-label">Passerelle active</span><p class="stat-value"><span id="gateway-dot" class="status-dot warning"></span><span id="gateway-status">Absente</span></p></article><article class="stat"><span class="stat-label">Cibles actives</span><p id="selected-count-card" class="stat-value">__SELECTED_COUNT__ / __TARGET_COUNT__</p></article></div>
 <div class="two-col"><section class="panel"><header class="panel-head"><div><span class="eyebrow">Exécution</span><h2>Lancer le scénario</h2><p>Seules les URL cochées utilisent la passerelle active.</p></div></header><div class="panel-body"><dl class="run-specs"><div><dt>Cibles sélectionnées</dt><dd id="run-selected-count">__SELECTED_COUNT__</dd></div><div><dt>Passerelle</dt><dd id="run-gateway-name">Aucune</dd></div><div><dt>Navigateur</dt><dd>Chromium neuf par visite</dd></div></dl><div class="actions"><button id="run-button" type="button">Lancer maintenant</button><button id="stop-button" class="danger" type="button" disabled>Arrêter</button></div></div></section><section class="panel"><header class="panel-head"><div><span class="eyebrow">Raccourcis</span><h2>Actions</h2><p>Accédez directement aux données utiles.</p></div></header><div class="panel-body"><div class="actions"><button class="secondary" data-go="targets" type="button">Gérer les URL</button><button class="secondary" data-go="gateways" type="button">Gérer les passerelles</button><button class="secondary" data-go="results" type="button">Voir les résultats</button><a class="button secondary" href="/results.csv">Exporter le CSV</a></div></div></section></div><p class="footer-note">Statut léger actualisé automatiquement, sans rechargement complet.</p>
@@ -1976,9 +2055,9 @@ button,.button{min-height:38px;border:1px solid var(--ink);border-radius:9px;bac
 </section>
 
 <section class="app-page" data-page="gateways" aria-label="Passerelles">
-<div class="page-head"><span class="eyebrow">Réseau</span><h1>Passerelles Rayobyte</h1><p>Les pseudos persistent dans Supabase. Les identifiants restent protégés dans un fichier éphémère privé et doivent être ressaisis après un redéploiement.</p></div>
-<section class="panel"><header class="panel-head"><div><h2 id="gateway-form-title">Nouvelle passerelle</h2><p>Une seule passerelle peut être active à la fois.</p></div><span id="gateway-count" class="count">0 passerelle</span></header><div class="panel-body"><form id="gateway-form"><input id="gateway-id" type="hidden"><div class="form-grid"><div><label for="gateway-alias">Pseudo</label><input id="gateway-alias" maxlength="100" placeholder="Rayobyte principale" required></div><div><label for="gateway-secret">Identifiants</label><input id="gateway-secret" type="password" autocomplete="off" placeholder="username:password@host:port"></div></div><div class="check-row"><input id="gateway-active" type="checkbox"><label for="gateway-active">Définir comme passerelle active</label></div><p class="hint">En modification, laissez les identifiants vides pour conserver la valeur éphémère actuelle.</p><div class="form-actions"><button data-config id="gateway-submit" type="submit">Ajouter</button><button data-config id="gateway-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
-<section class="panel"><header class="panel-head"><div><h2>Passerelles enregistrées</h2><p>Réactivez les entrées marquées « identifiants manquants » après un redéploiement.</p></div></header><div class="table-wrap"><table><thead><tr><th>Active</th><th>Pseudo</th><th>Identifiants</th><th>Actions</th></tr></thead><tbody id="gateway-rows"></tbody></table></div></section>
+<div class="page-head"><span class="eyebrow">Réseau</span><h1>Passerelles Rayobyte</h1><p>Les pseudos, la sélection active et les identifiants sont conservés durablement. Les identifiants sont chiffrés dans Supabase Vault et ne sont jamais affichés dans l’interface.</p></div>
+<section class="panel"><header class="panel-head"><div><h2 id="gateway-form-title">Nouvelle passerelle</h2><p>Une seule passerelle peut être active à la fois.</p></div><span id="gateway-count" class="count">0 passerelle</span></header><div class="panel-body"><form id="gateway-form"><input id="gateway-id" type="hidden"><div class="form-grid"><div><label for="gateway-alias">Pseudo</label><input id="gateway-alias" maxlength="100" placeholder="Rayobyte principale" required></div><div><label for="gateway-secret">Identifiants</label><input id="gateway-secret" type="password" autocomplete="off" placeholder="username:password@host:port"></div></div><div class="check-row"><input id="gateway-active" type="checkbox"><label for="gateway-active">Définir comme passerelle active</label></div><p class="hint">En modification, laissez les identifiants vides pour conserver la valeur enregistrée dans Supabase Vault.</p><div class="form-actions"><button data-config id="gateway-submit" type="submit">Ajouter</button><button data-config id="gateway-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div><h2>Passerelles enregistrées</h2><p>Une passerelle enregistrée reste disponible après les redémarrages et redéploiements.</p></div></header><div class="table-wrap"><table><thead><tr><th>Active</th><th>Pseudo</th><th>Identifiants</th><th>Actions</th></tr></thead><tbody id="gateway-rows"></tbody></table></div></section>
 </section>
 
 <section class="app-page" data-page="results" aria-label="Résultats">
@@ -2013,9 +2092,8 @@ const pageLabels={home:'Accueil',targets:'URL',gateways:'Passerelles',results:'R
 let activePage='home';
 function showNotice(message,isError=false){const node=document.createElement('div');node.className='notice'+(isError?' error':'');node.textContent=message;notices.replaceChildren(node);window.setTimeout(()=>{if(node.isConnected)node.remove()},6500)}
 async function api(url,{method='GET',body=null}={}){const options={method,headers:{Accept:'application/json'}};if(method!=='GET')options.headers['X-CSRF-Token']=csrfToken;if(body!==null){options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}const response=await fetch(url,options);let value;try{value=await response.json()}catch{throw new Error('Réponse serveur invalide.')}if(!response.ok||!value.ok)throw new Error(value.error||'Opération impossible.');return value}
-function goToPage(name,updateHash=true){const index=pages.indexOf(name);if(index<0)return;activePage=name;document.getElementById('app-track').style.transform=`translateX(-${index*100}%)`;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.nav===name));document.querySelectorAll('.app-page').forEach(node=>{const hidden=node.dataset.page!==name;node.setAttribute('aria-hidden',String(hidden));node.inert=hidden});document.getElementById('page-title').textContent=pageLabels[name];if(updateHash)history.replaceState(null,'',`#${name}`)}
-document.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.nav)));document.querySelectorAll('[data-go]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.go)));window.addEventListener('hashchange',()=>goToPage(location.hash.slice(1)||'home',false));
-let touchStartX=0;document.getElementById('app-track').addEventListener('touchstart',event=>{touchStartX=event.changedTouches[0].screenX},{passive:true});document.getElementById('app-track').addEventListener('touchend',event=>{const delta=event.changedTouches[0].screenX-touchStartX;if(Math.abs(delta)<60)return;const index=pages.indexOf(activePage)+(delta<0?1:-1);if(index>=0&&index<pages.length)goToPage(pages[index])},{passive:true});
+function goToPage(name,updateHash=true){if(!pages.includes(name))return;activePage=name;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.nav===name));document.querySelectorAll('.app-page').forEach(node=>{const hidden=node.dataset.page!==name;node.classList.toggle('active',!hidden);node.setAttribute('aria-hidden',String(hidden));node.inert=hidden});document.getElementById('page-title').textContent=pageLabels[name];if(updateHash)history.replaceState(null,'',`#${name}`)}
+document.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.nav)));document.querySelectorAll('[data-go]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.go)));
 function cell(text,className=''){const node=document.createElement('td');node.textContent=text??'';if(className)node.className=className;return node}function actionButton(label,className,handler){const node=document.createElement('button');node.type='button';node.className=(className||'secondary')+' small';node.textContent=label;node.addEventListener('click',handler);return node}
 function resetTargetForm(){document.getElementById('target-form').reset();document.getElementById('target-id').value='';document.getElementById('target-selected').checked=true;document.getElementById('target-form-title').textContent='Nouvelle cible';document.getElementById('target-submit').textContent='Ajouter';document.getElementById('target-cancel').hidden=true}
 function editTarget(target){document.getElementById('target-id').value=target.id;document.getElementById('target-alias').value=target.alias;document.getElementById('target-url').value=target.url;document.getElementById('target-button').value=target.button_text;document.getElementById('target-second-button').value=target.second_button_text||'';document.getElementById('target-selected').checked=target.selected;document.getElementById('target-form-title').textContent='Modifier la cible';document.getElementById('target-submit').textContent='Enregistrer';document.getElementById('target-cancel').hidden=false;goToPage('targets');document.getElementById('target-alias').focus()}
@@ -2040,7 +2118,7 @@ document.getElementById('settings-form').addEventListener('submit',async event=>
 document.getElementById('run-button').addEventListener('click',async()=>{try{const value=await api('/api/run',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});document.getElementById('stop-button').addEventListener('click',async()=>{try{const value=await api('/api/stop',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
 document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});document.getElementById('delete-selected-results').addEventListener('click',()=>{const selected=[...document.querySelectorAll('.result-selector:checked')];const visits=selected.filter(node=>node.dataset.kind==='visit').map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));const runIds=selected.filter(node=>node.dataset.kind==='run').map(node=>node.dataset.runId);deleteResultData({action:'selected',visits,run_ids:runIds},`Supprimer ${selected.length} élément(s) de Supabase ?`)});document.getElementById('clear-results').addEventListener('click',()=>deleteResultData({action:'all'},'Effacer définitivement tout l’historique Supabase ?'));
 let pollInProgress=false;async function pollStatus(){if(pollInProgress||resultMutationPending)return;pollInProgress=true;try{const value=await api('/api/status');const wasRunning=Boolean(runState.running);runState=value.run;renderRun();if(runState.running||wasRunning)await refreshState()}catch(error){showNotice(error.message,true)}finally{pollInProgress=false}}
-renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetGatewayForm();goToPage(pages.includes(location.hash.slice(1))?location.hash.slice(1):'home',false);window.setInterval(pollStatus,3000);
+renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetGatewayForm();goToPage('home');window.setInterval(pollStatus,3000);
 </script>
 </body>
 </html>"""

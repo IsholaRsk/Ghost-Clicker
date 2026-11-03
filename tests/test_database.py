@@ -83,6 +83,35 @@ class SupabaseStorageTests(unittest.TestCase):
             },
         )
 
+    def test_gateway_secrets_use_dedicated_vault_functions(self):
+        storage = SupabaseStorage(
+            "https://project.supabase.co", "sb_secret_value_for_tests_123456789"
+        )
+        gateway_values = {
+            "gateway_primary": "sample-user:sample-pass@proxy.example:8000"
+        }
+        with mock.patch.object(
+            SupabaseStorage,
+            "_request",
+            side_effect=[gateway_values, 1],
+        ) as request:
+            loaded = storage.load_gateway_secrets()
+            storage.save_gateway_secrets(gateway_values)
+
+        self.assertEqual(loaded, gateway_values)
+        self.assertEqual(
+            request.call_args_list[0].args,
+            ("POST", "rpc/ghost_clicker_load_gateway_secrets"),
+        )
+        self.assertEqual(
+            request.call_args_list[1].args,
+            ("POST", "rpc/ghost_clicker_replace_gateway_secrets"),
+        )
+        self.assertEqual(
+            request.call_args_list[1].kwargs["body"],
+            {"p_secrets": gateway_values},
+        )
+
     def test_progress_upserts_summary_and_latest_visit_atomically(self):
         storage = SupabaseStorage(
             "https://project.supabase.co", "sb_secret_value_for_tests_123456789"

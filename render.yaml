@@ -20,7 +20,7 @@ services:
         value: "10"
       - key: PROXY_GATEWAY_FILE
         value: /tmp/ghost-clicker-proxy-gateway.txt
-      # Registre éphémère des identifiants, jamais synchronisé avec Supabase.
+      # Cache privé local ; la source durable chiffrée est Supabase Vault.
       - key: PROXY_GATEWAYS_FILE
         value: /tmp/ghost-clicker-proxy-gateways.json
       - key: HEADLESS

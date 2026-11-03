@@ -33,6 +33,8 @@ class WebUploadTests(unittest.TestCase):
             },
         )
         self.environment.start()
+        with web.GATEWAY_SECRETS_LOCK:
+            web.GATEWAY_SECRETS_CACHE = None
         self.client = web.APP.test_client()
         credentials = base64.b64encode(b"admin:TEST_ADMIN_TOKEN").decode("ascii")
         self.headers = {"Authorization": f"Basic {credentials}"}
@@ -65,6 +67,8 @@ class WebUploadTests(unittest.TestCase):
         web.STOP_EVENT.clear()
 
     def tearDown(self):
+        with web.GATEWAY_SECRETS_LOCK:
+            web.GATEWAY_SECRETS_CACHE = None
         self.environment.stop()
         self.temporary_directory.cleanup()
 
@@ -75,7 +79,7 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_the_dark_sliding_application_layout(self):
+    def test_home_uses_large_text_and_button_only_application_navigation(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
 
@@ -87,15 +91,20 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("color-scheme:dark", content)
         self.assertIn("--canvas:#0d0f12", content)
         self.assertIn('id="app-track" class="app-track"', content)
-        self.assertIn('class="app-page" data-page="home"', content)
+        self.assertIn('class="app-page active" data-page="home"', content)
         self.assertIn('class="app-page" data-page="targets"', content)
         self.assertIn('class="app-page" data-page="gateways"', content)
         self.assertIn('class="app-page" data-page="results"', content)
         self.assertIn('class="app-page" data-page="settings"', content)
         self.assertIn('class="bottom-nav"', content)
         self.assertIn('data-nav="gateways"', content)
-        self.assertIn("translateX", content)
-        self.assertIn("touchstart", content)
+        self.assertIn("node.classList.toggle('active',!hidden)", content)
+        self.assertIn("font:16px/1.6", content)
+        self.assertIn("height:48px", content)
+        self.assertNotIn("style.transform", content)
+        self.assertNotIn("touchstart", content)
+        self.assertNotIn("touchend", content)
+        self.assertNotIn("hashchange", content)
         self.assertIn("Base de données", content)
         self.assertIn("Cache local", content)
         self.assertIn('value="continuous"', content)
@@ -173,7 +182,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(self.gateway_path.read_text(encoding="utf-8"), original)
         self.assertNotIn("invalid-sensitive-content", query["error"][0])
 
-    def test_gateway_crud_persists_only_metadata_and_reports_missing_secrets(self):
+    def test_gateway_crud_keeps_secrets_out_of_settings_and_handles_cache_loss(self):
         first_gateway = "sample-user-a:sample-pass-a@proxy-a.example:8000"
         second_gateway = "sample-user-b:sample-pass-b@proxy-b.example:8001"
 
@@ -244,6 +253,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertTrue(remaining[0]["active"])
 
         self.gateway_registry_path.unlink()
+        with web.GATEWAY_SECRETS_LOCK:
+            web.GATEWAY_SECRETS_CACHE = None
         state = self.client.get("/api/state", headers=self.headers)
         self.assertEqual(state.status_code, 200)
         persisted = state.get_json()["gateways"]
@@ -267,6 +278,31 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(deleted.get_json()["gateways"], [])
         self.assertEqual(web.load_app_settings()["gateways"], [])
         self.assertFalse(self.gateway_path.exists())
+
+    def test_gateway_credentials_survive_redeployment_with_supabase_vault(self):
+        gateway_values = {
+            "gateway_persistent": (
+                "sample-user:sample-pass@persistent.proxy.example:8000"
+            )
+        }
+        storage = mock.Mock()
+        storage.load_gateway_secrets.return_value = gateway_values
+
+        with mock.patch.object(
+            web.SupabaseStorage, "from_env", return_value=storage
+        ):
+            web.write_gateway_secrets(gateway_values)
+            self.gateway_registry_path.unlink()
+            with web.GATEWAY_SECRETS_LOCK:
+                web.GATEWAY_SECRETS_CACHE = None
+            restored = web.read_gateway_secrets()
+
+        self.assertEqual(restored, gateway_values)
+        storage.save_gateway_secrets.assert_called_once_with(gateway_values)
+        storage.load_gateway_secrets.assert_called_once_with()
+        self.assertEqual(
+            stat.S_IMODE(self.gateway_registry_path.stat().st_mode), 0o600
+        )
 
     def test_target_upload_accepts_unrelated_public_domains_and_preserves_schedule(self):
         web.save_app_settings(
