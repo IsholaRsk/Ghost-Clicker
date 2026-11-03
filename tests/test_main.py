@@ -114,6 +114,13 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.username, "sample-user-gateway")
         self.assertEqual(gateway.password, "sample-pass-gateway")
 
+    def test_uses_a_safe_gateway_alias_comment_as_result_metadata(self):
+        gateway = main.parse_proxy_gateway_text(
+            f"# alias: Rayobyte principale\n{self.gateway_line()}\n"
+        )
+
+        self.assertEqual(gateway.name, "Rayobyte principale")
+
     def test_rejects_a_list_with_more_than_one_gateway(self):
         content = (
             f"{self.gateway_line('one', 8000)}\n"

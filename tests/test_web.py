@@ -17,6 +17,7 @@ class WebUploadTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         root = Path(self.temporary_directory.name)
         self.gateway_path = root / "runtime" / "proxy-gateway.txt"
+        self.gateway_registry_path = root / "runtime" / "proxy-gateways.json"
         self.settings_path = root / "runtime" / "settings.json"
         self.reports_path = root / "runtime" / "reports.json"
         self.environment = mock.patch.dict(
@@ -24,6 +25,7 @@ class WebUploadTests(unittest.TestCase):
             {
                 "ADMIN_TOKEN": "TEST_ADMIN_TOKEN",
                 "PROXY_GATEWAY_FILE": str(self.gateway_path),
+                "PROXY_GATEWAYS_FILE": str(self.gateway_registry_path),
                 "SETTINGS_FILE": str(self.settings_path),
                 "REPORTS_FILE": str(self.reports_path),
                 "SUPABASE_URL": "",
@@ -73,23 +75,34 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_the_dark_minimalist_console_layout(self):
+    def test_home_uses_the_dark_sliding_application_layout(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Console d’exécution", content)
+        self.assertIn("Vue d’ensemble", content)
         self.assertIn("Bibliothèque d’URL", content)
-        self.assertIn("Console dynamique", content)
+        self.assertIn("Passerelles Rayobyte", content)
+        self.assertIn("Résultats Supabase", content)
         self.assertIn("color-scheme:dark", content)
         self.assertIn("--canvas:#0d0f12", content)
-        self.assertIn('class="status-grid"', content)
+        self.assertIn('id="app-track" class="app-track"', content)
+        self.assertIn('class="app-page" data-page="home"', content)
+        self.assertIn('class="app-page" data-page="targets"', content)
+        self.assertIn('class="app-page" data-page="gateways"', content)
+        self.assertIn('class="app-page" data-page="results"', content)
+        self.assertIn('class="app-page" data-page="settings"', content)
+        self.assertIn('class="bottom-nav"', content)
+        self.assertIn('data-nav="gateways"', content)
+        self.assertIn("translateX", content)
+        self.assertIn("touchstart", content)
         self.assertIn("Base de données", content)
         self.assertIn("Cache local", content)
         self.assertIn('value="continuous"', content)
         self.assertIn("Cycles de cinq minutes", content)
         self.assertIn("Arrêter", content)
         self.assertIn("/api/targets", content)
+        self.assertIn("/api/gateways", content)
         self.assertIn("fetch(url,options)", content)
         self.assertNotIn('http-equiv="refresh"', content)
         self.assertNotIn("Importer les cibles", content)
@@ -122,9 +135,16 @@ class WebUploadTests(unittest.TestCase):
         query = parse_qs(urlsplit(response.headers["Location"]).query)
         self.assertEqual(query["gateway"], ["1"])
         self.assertEqual(
-            self.gateway_path.read_text(encoding="utf-8"), f"{line}\n"
+            self.gateway_path.read_text(encoding="utf-8"),
+            f"# alias: passerelle-rotative\n{line}\n",
         )
         self.assertEqual(stat.S_IMODE(self.gateway_path.stat().st_mode), 0o600)
+        self.assertEqual(
+            stat.S_IMODE(self.gateway_registry_path.stat().st_mode), 0o600
+        )
+        settings = web.load_app_settings()
+        self.assertEqual(settings["gateways"][0]["alias"], "passerelle-rotative")
+        self.assertTrue(settings["gateways"][0]["active"])
         home = self.client.get("/", headers=self.headers)
         self.assertNotIn(line, home.get_data(as_text=True))
 
@@ -148,6 +168,101 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("error", query)
         self.assertEqual(self.gateway_path.read_text(encoding="utf-8"), original)
         self.assertNotIn("invalid-sensitive-content", query["error"][0])
+
+    def test_gateway_crud_persists_only_metadata_and_reports_missing_secrets(self):
+        first_gateway = "sample-user-a:sample-pass-a@proxy-a.example:8000"
+        second_gateway = "sample-user-b:sample-pass-b@proxy-b.example:8001"
+
+        created = self.client.post(
+            "/api/gateways",
+            json={
+                "alias": "Rayobyte principale",
+                "gateway": first_gateway,
+                "active": False,
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        self.assertNotIn(first_gateway, created.get_data(as_text=True))
+        first = created.get_json()["gateways"][0]
+        self.assertTrue(first["active"])
+        self.assertTrue(first["configured"])
+
+        raw_settings = self.settings_path.read_text(encoding="utf-8")
+        self.assertIn("Rayobyte principale", raw_settings)
+        self.assertNotIn("sample-pass-a", raw_settings)
+        self.assertNotIn("proxy-a.example", raw_settings)
+        self.assertEqual(
+            stat.S_IMODE(self.gateway_registry_path.stat().st_mode), 0o600
+        )
+
+        created = self.client.post(
+            "/api/gateways",
+            json={
+                "alias": "Rayobyte secours",
+                "gateway": second_gateway,
+                "active": True,
+            },
+            headers=self.api_headers,
+        )
+        gateways = created.get_json()["gateways"]
+        first_id = gateways[0]["id"]
+        second_id = gateways[1]["id"]
+        self.assertFalse(gateways[0]["active"])
+        self.assertTrue(gateways[1]["active"])
+        active_text = self.gateway_path.read_text(encoding="utf-8")
+        self.assertIn("# alias: Rayobyte secours", active_text)
+        self.assertIn(second_gateway, active_text)
+
+        updated = self.client.patch(
+            f"/api/gateways/{first_id}",
+            json={"alias": "Rayobyte prioritaire", "gateway": ""},
+            headers=self.api_headers,
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(updated.get_json()["gateways"][0]["configured"])
+
+        selected = self.client.post(
+            f"/api/gateways/{first_id}/select",
+            json={},
+            headers=self.api_headers,
+        )
+        self.assertEqual(selected.status_code, 200)
+        self.assertTrue(selected.get_json()["gateways"][0]["active"])
+        self.assertFalse(selected.get_json()["gateways"][1]["active"])
+
+        deleted = self.client.delete(
+            f"/api/gateways/{first_id}", headers=self.api_headers
+        )
+        self.assertEqual(deleted.status_code, 200)
+        remaining = deleted.get_json()["gateways"]
+        self.assertEqual([item["id"] for item in remaining], [second_id])
+        self.assertTrue(remaining[0]["active"])
+
+        self.gateway_registry_path.unlink()
+        state = self.client.get("/api/state", headers=self.headers)
+        self.assertEqual(state.status_code, 200)
+        persisted = state.get_json()["gateways"]
+        self.assertEqual(persisted[0]["alias"], "Rayobyte secours")
+        self.assertTrue(persisted[0]["active"])
+        self.assertFalse(persisted[0]["configured"])
+        self.assertFalse(self.gateway_path.exists())
+
+        refused = self.client.post(
+            f"/api/gateways/{second_id}/select",
+            json={},
+            headers=self.api_headers,
+        )
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("Ressaisissez", refused.get_json()["error"])
+
+        deleted = self.client.delete(
+            f"/api/gateways/{second_id}", headers=self.api_headers
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["gateways"], [])
+        self.assertEqual(web.load_app_settings()["gateways"], [])
+        self.assertFalse(self.gateway_path.exists())
 
     def test_target_upload_accepts_unrelated_public_domains_and_preserves_schedule(self):
         web.save_app_settings(
@@ -397,6 +512,7 @@ class WebUploadTests(unittest.TestCase):
                     "selected": True,
                 }
             ],
+            "gateways": [],
             "schedule_enabled": True,
             "interval_minutes": 180,
             "execution_mode": "range",

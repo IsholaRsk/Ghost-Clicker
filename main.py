@@ -274,7 +274,23 @@ def validate_proxy_server(value: str) -> str:
 
 
 def parse_proxy_gateway_text(value: str) -> ProxyConfig:
-    """Lit une passerelle rotative : username:password@host:port."""
+    """Lit une passerelle rotative et son éventuel pseudo en commentaire."""
+
+    alias = "passerelle-rotative"
+    for raw_line in value.splitlines():
+        stripped = raw_line.strip()
+        if stripped.lower().startswith("# alias:"):
+            candidate = " ".join(stripped.split(":", maxsplit=1)[1].split())
+            if (
+                candidate
+                and len(candidate) <= 100
+                and not any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in candidate
+                )
+            ):
+                alias = candidate
+            break
 
     lines = [
         (line_number, raw_line.strip())
@@ -307,7 +323,7 @@ def parse_proxy_gateway_text(value: str) -> ProxyConfig:
             f"Passerelle ligne {line_number} : valeur incomplète."
         )
     server = validate_proxy_server(f"http://{host}:{port}")
-    return ProxyConfig("passerelle-rotative", server, username, password)
+    return ProxyConfig(alias, server, username, password)
 
 
 def load_proxy_gateway(path: Path) -> ProxyConfig:
