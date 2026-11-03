@@ -103,6 +103,10 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("Arrêter", content)
         self.assertIn("/api/targets", content)
         self.assertIn("/api/gateways", content)
+        self.assertIn("/api/results/delete", content)
+        self.assertIn("La suppression reste disponible pendant une exécution", content)
+        self.assertIn("exécution(s) sans visite", content)
+        self.assertIn("dataset.kind", content)
         self.assertIn("fetch(url,options)", content)
         self.assertNotIn('http-equiv="refresh"', content)
         self.assertNotIn("Importer les cibles", content)
@@ -660,8 +664,10 @@ class WebUploadTests(unittest.TestCase):
             }
         )
 
-        visit_deleted = self.client.delete(
-            "/api/results",
+        with web.STATE_LOCK:
+            web.RUN_STATE["running"] = True
+        visit_deleted = self.client.post(
+            "/api/results/delete",
             json={
                 "action": "selected",
                 "visits": [
@@ -672,6 +678,10 @@ class WebUploadTests(unittest.TestCase):
             headers=self.api_headers,
         )
         self.assertEqual(visit_deleted.status_code, 200)
+        self.assertEqual(
+            visit_deleted.get_json()["summary"], {"visits": 1, "runs": 0}
+        )
+        self.assertIn("exécution en cours", visit_deleted.get_json()["message"])
         remaining = visit_deleted.get_json()["reports"][0]["results"]
         self.assertEqual([item["started_at"] for item in remaining], ["second"])
 
@@ -689,18 +699,96 @@ class WebUploadTests(unittest.TestCase):
 
         web.append_report(
             {
+                "run_id": "run_without_visits_123",
+                "completed_visits": 0,
+                "results": [],
+            }
+        )
+        empty_run_deleted = self.client.post(
+            "/api/results/delete",
+            json={
+                "action": "selected",
+                "visits": [],
+                "run_ids": ["run_without_visits_123"],
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(empty_run_deleted.status_code, 200)
+        self.assertEqual(empty_run_deleted.get_json()["reports"], [])
+
+        web.append_report(
+            {
                 "run_id": "run_clear_123",
                 "completed_visits": 1,
                 "results": [{"started_at": "third", "success": True}],
             }
         )
-        cleared = self.client.delete(
-            "/api/results",
+        cleared = self.client.post(
+            "/api/results/delete",
             json={"action": "all"},
             headers=self.api_headers,
         )
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(cleared.get_json()["reports"], [])
+        self.assertIn("Historique Supabase effacé", cleared.get_json()["message"])
+
+    def test_result_deletion_calls_supabase_and_refreshes_the_interface(self):
+        storage = mock.Mock()
+        storage.delete_results.return_value = {"visits": 2, "runs": 1}
+        storage.load_reports.return_value = []
+
+        with mock.patch.object(
+            web.SupabaseStorage, "from_env", return_value=storage
+        ):
+            response = self.client.post(
+                "/api/results/delete",
+                json={
+                    "action": "selected",
+                    "visits": [
+                        {"run_id": "run_supabase_123", "visit_number": 2}
+                    ],
+                    "run_ids": ["run_supabase_456"],
+                },
+                headers=self.api_headers,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["summary"], {"visits": 2, "runs": 1})
+        self.assertEqual(response.get_json()["reports"], [])
+        storage.delete_results.assert_called_once_with(
+            visits=[{"run_id": "run_supabase_123", "visit_number": 2}],
+            run_ids=["run_supabase_456"],
+        )
+        storage.load_reports.assert_called_once_with(all_data=False)
+
+    def test_result_deletion_reports_safe_supabase_configuration_errors(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SECRET_KEY": "invalid-test-value",
+            },
+        ):
+            response = self.client.post(
+                "/api/results/delete",
+                json={"action": "all"},
+                headers=self.api_headers,
+            )
+
+        self.assertEqual(response.status_code, 400)
+        error = response.get_json()["error"]
+        self.assertIn("SUPABASE_SECRET_KEY", error)
+        self.assertNotIn("invalid-test-value", error)
+
+    def test_result_deletion_rejects_unknown_actions(self):
+        response = self.client.post(
+            "/api/results/delete",
+            json={"action": "unexpected"},
+            headers=self.api_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inconnue", response.get_json()["error"])
 
     def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
         web.append_report(

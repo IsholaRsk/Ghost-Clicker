@@ -577,6 +577,18 @@ def upsert_report(value: dict[str, Any]) -> None:
             database_failure(exc)
 
 
+def supabase_deletion_error(action: str) -> ConfigurationError:
+    with DATABASE_LOCK:
+        detail = str(DATABASE_STATE.get("last_error", "")).strip()
+    if not detail:
+        detail = (
+            "vérifiez SUPABASE_SECRET_KEY et la connexion du projet dans Render"
+        )
+    return ConfigurationError(
+        f"Impossible de {action} dans Supabase : {detail.rstrip('.')}."
+    )
+
+
 def clear_stored_reports() -> None:
     storage = supabase_storage()
     database_requested = bool(
@@ -584,18 +596,14 @@ def clear_stored_reports() -> None:
         or os.getenv("SUPABASE_SECRET_KEY", "").strip()
     )
     if storage is None and database_requested:
-        raise ConfigurationError(
-            "Impossible d'effacer les résultats tant que Supabase est indisponible."
-        )
+        raise supabase_deletion_error("effacer les résultats")
     if storage is not None:
         try:
             storage.clear_reports()
             database_success()
         except StorageError as exc:
             database_failure(exc)
-            raise ConfigurationError(
-                "Impossible d'effacer les résultats dans Supabase."
-            ) from exc
+            raise supabase_deletion_error("effacer les résultats") from exc
     path = reports_path()
     with REPORTS_LOCK:
         if path.exists():
@@ -642,9 +650,7 @@ def delete_stored_results(
         or os.getenv("SUPABASE_SECRET_KEY", "").strip()
     )
     if storage is None and database_requested:
-        raise ConfigurationError(
-            "Impossible de supprimer les résultats tant que Supabase est indisponible."
-        )
+        raise supabase_deletion_error("supprimer les résultats")
     summary = {"visits": 0, "runs": 0}
     if storage is not None:
         try:
@@ -655,9 +661,7 @@ def delete_stored_results(
             database_success()
         except StorageError as exc:
             database_failure(exc)
-            raise ConfigurationError(
-                "Impossible de supprimer les résultats dans Supabase."
-            ) from exc
+            raise supabase_deletion_error("supprimer les résultats") from exc
 
     visit_keys = {
         (item["run_id"], item["visit_number"]) for item in normalized_visits
@@ -1550,17 +1554,20 @@ def api_stop_now() -> tuple[Response, int] | Response:
 
 
 @APP.delete("/api/results")
+@APP.post("/api/results/delete")
 def api_delete_results() -> tuple[Response, int] | Response:
+    """Supprime l'historique même pendant une exécution en cours."""
+
     try:
         require_csrf()
-        require_idle_configuration()
         payload = request_json_object()
-        action = str(payload.get("action", "selected"))
+        action = str(payload.get("action", "selected")).strip().lower()
         if action == "all":
             clear_stored_reports()
             summary = {"visits": 0, "runs": 0}
             event_type = "reports_cleared"
-        else:
+            message = "Historique Supabase effacé."
+        elif action == "selected":
             raw_visits = payload.get("visits", [])
             raw_run_ids = payload.get("run_ids", [])
             if not isinstance(raw_visits, list) or not isinstance(raw_run_ids, list):
@@ -1570,6 +1577,19 @@ def api_delete_results() -> tuple[Response, int] | Response:
                 run_ids=[str(value) for value in raw_run_ids],
             )
             event_type = "results_deleted"
+            message = (
+                "Suppression Supabase terminée : "
+                f"{summary['visits']} visite(s) et {summary['runs']} exécution(s)."
+            )
+        else:
+            raise ConfigurationError("Action de suppression inconnue.")
+
+        with STATE_LOCK:
+            running = bool(RUN_STATE["running"])
+        if running:
+            message += (
+                " L'exécution en cours peut encore enregistrer de nouvelles visites."
+            )
         record_database_event(
             event_type,
             {
@@ -1578,11 +1598,16 @@ def api_delete_results() -> tuple[Response, int] | Response:
                 "updated_at": now_iso(),
             },
         )
+        reports = reports_for_api(load_reports())
+        with DATABASE_LOCK:
+            database_state = dict(DATABASE_STATE)
         return jsonify(
             {
                 "ok": True,
-                "message": "Résultats supprimés.",
-                "reports": reports_for_api(load_reports()),
+                "message": message,
+                "summary": summary,
+                "reports": reports,
+                "database": database_state,
             }
         )
     except ConfigurationError as exc:
@@ -1958,7 +1983,7 @@ button,.button{min-height:38px;border:1px solid var(--ink);border-radius:9px;bac
 
 <section class="app-page" data-page="results" aria-label="Résultats">
 <div class="page-head"><span class="eyebrow">Historique</span><h1>Résultats Supabase</h1><p>Consultez et supprimez les visites directement depuis l’application.</p></div>
-<section class="panel"><header class="panel-head"><div class="actions"><button id="delete-selected-results" class="danger small" type="button" disabled>Supprimer la sélection</button><button id="clear-results" class="danger small" type="button">Tout effacer</button><a class="button secondary small" href="/results.csv">Télécharger le CSV</a></div><span id="result-count" class="count">0 visite</span></header><div class="table-wrap"><table><thead><tr><th><input id="select-all-results" type="checkbox" aria-label="Tout sélectionner"></th><th>Date</th><th>Pseudo</th><th>Source</th><th>Répétition</th><th>URL initiale</th><th>URL finale</th><th>Résultat</th><th>Erreur</th><th>Actions</th></tr></thead><tbody id="result-rows"></tbody></table></div></section>
+<section id="results-panel" class="panel" aria-busy="false"><header class="panel-head"><div><div class="actions"><button id="delete-selected-results" class="danger small" type="button" disabled>Supprimer la sélection</button><button id="clear-results" class="danger small" type="button">Tout effacer</button><a class="button secondary small" href="/results.csv">Télécharger le CSV</a></div><p>La suppression reste disponible pendant une exécution. Les nouvelles visites continueront à apparaître.</p></div><span id="result-count" class="count">0 visite</span></header><div class="table-wrap"><table><thead><tr><th><input id="select-all-results" type="checkbox" aria-label="Tout sélectionner"></th><th>Date</th><th>Pseudo</th><th>Source</th><th>Répétition</th><th>URL initiale</th><th>URL finale</th><th>Résultat</th><th>Erreur</th><th>Actions</th></tr></thead><tbody id="result-rows"></tbody></table></div></section>
 </section>
 
 <section class="app-page" data-page="settings" aria-label="Réglages">
@@ -1981,6 +2006,7 @@ let gateways=__GATEWAYS_JSON__;
 let reports=__REPORTS_JSON__;
 let runState=__RUN_STATE_JSON__;
 let databaseState=__DATABASE_STATE_JSON__;
+let resultMutationPending=false;
 const notices=document.getElementById('notices');
 const pages=['home','targets','gateways','results','settings'];
 const pageLabels={home:'Accueil',targets:'URL',gateways:'Passerelles',results:'Résultats',settings:'Réglages'};
@@ -1998,18 +2024,22 @@ function resetGatewayForm(){document.getElementById('gateway-form').reset();docu
 function editGateway(gateway){document.getElementById('gateway-id').value=gateway.id;document.getElementById('gateway-alias').value=gateway.alias;document.getElementById('gateway-secret').value='';document.getElementById('gateway-secret').required=false;document.getElementById('gateway-active').checked=gateway.active;document.getElementById('gateway-active').disabled=gateway.active;document.getElementById('gateway-form-title').textContent='Modifier la passerelle';document.getElementById('gateway-submit').textContent='Enregistrer';document.getElementById('gateway-cancel').hidden=false;goToPage('gateways');document.getElementById('gateway-alias').focus()}
 function renderGateways(){const body=document.getElementById('gateway-rows');body.replaceChildren();document.getElementById('gateway-count').textContent=`${gateways.length} passerelle(s)`;if(!gateways.length){const row=document.createElement('tr');const empty=cell('Aucune passerelle.','empty');empty.colSpan=4;row.append(empty);body.append(row);renderConnection();return}for(const gateway of gateways){const row=document.createElement('tr');if(gateway.active)row.className='gateway-active';const activeCell=document.createElement('td');const active=document.createElement('span');active.className='badge '+(gateway.active?'active-badge':'');active.textContent=gateway.active?'ACTIVE':'—';activeCell.append(active);const statusCell=document.createElement('td');const status=document.createElement('span');status.className='badge '+(gateway.configured?'success':'missing-badge');status.textContent=gateway.configured?'DISPONIBLES':'MANQUANTS';statusCell.append(status);const actions=document.createElement('td');actions.className='row-actions';if(!gateway.active)actions.append(actionButton('Activer','secondary',async()=>{try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}/select`,{method:'POST',body:{}});gateways=value.gateways;renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));actions.append(actionButton('Modifier','secondary',()=>editGateway(gateway)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la passerelle « ${gateway.alias} » ?`))return;try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}`,{method:'DELETE'});gateways=value.gateways;resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(activeCell,cell(gateway.alias),statusCell,actions);body.append(row)}renderConnection();renderRun()}
 function renderConnection(){const active=gateways.find(item=>item.active);const ready=Boolean(active&&active.configured);document.getElementById('gateway-status').textContent=active?(ready?active.alias:`${active.alias} · identifiants manquants`):'Absente';document.getElementById('gateway-dot').className='status-dot '+(ready?'ready':'warning');document.getElementById('run-gateway-name').textContent=active?active.alias:'Aucune';let label='Cache local',css='warning';if(databaseState.connected){label='Supabase connectée';css='ready'}else if(databaseState.configured){label='Connexion requise'}document.getElementById('database-status').textContent=label;document.getElementById('database-dot').className='status-dot '+css}
-function renderRun(){const running=Boolean(runState.running);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}document.getElementById('run-status').lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+(running?'running':'idle');const selected=targets.filter(item=>item.selected).length;const active=gateways.find(item=>item.active&&item.configured);document.getElementById('run-button').disabled=running||selected===0||!active;document.getElementById('stop-button').disabled=!running||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=running});document.querySelectorAll('#target-rows input,#target-rows button,#gateway-rows button').forEach(node=>{node.disabled=running});document.querySelectorAll('#result-rows input,#result-rows button,#select-all-results,#clear-results').forEach(node=>{node.disabled=running});if(!running)updateResultSelection()}
+function renderRun(){const running=Boolean(runState.running);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}document.getElementById('run-status').lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+(running?'running':'idle');const selected=targets.filter(item=>item.selected).length;const active=gateways.find(item=>item.active&&item.configured);document.getElementById('run-button').disabled=running||selected===0||!active;document.getElementById('stop-button').disabled=!running||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=running});document.querySelectorAll('#target-rows input,#target-rows button,#gateway-rows button').forEach(node=>{node.disabled=running});updateResultSelection()}
 function resultLabel(report,result){if(report.execution_mode==='continuous')return `cycle ${result.continuous_window||''} · ${result.window_repetition_count||''}`;return `${result.repetition||''} / ${report.repetition_count??''}`}
-function renderReports(){const body=document.getElementById('result-rows');body.replaceChildren();let count=0;for(const report of [...reports].reverse()){const runId=String(report.run_id||'');for(const result of [...(report.results||[])].reverse()){count++;const row=document.createElement('tr');const selectCell=document.createElement('td');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='result-selector';checkbox.dataset.runId=runId;checkbox.dataset.visitNumber=String(result.visit_number||'');checkbox.addEventListener('change',updateResultSelection);selectCell.append(checkbox);const source=String(report.source||'')+(report.in_progress?' · EN COURS':'');const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(result.success?'success':'failure');badge.textContent=result.success?'SUCCÈS':'ÉCHEC';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Visite','danger',()=>deleteVisits([{run_id:runId,visit_number:Number(result.visit_number)}])),actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(result.started_at||''),cell(result.target_alias||result.target_id||'—'),cell(source),cell(resultLabel(report,result)),cell(result.initial_url||'','url-cell'),cell(result.final_url||'','url-cell'),outcome,cell(result.error||'','url-cell'),actions);body.append(row)}}if(!count){const row=document.createElement('tr');const empty=cell('Aucun résultat.','empty');empty.colSpan=10;row.append(empty);body.append(row)}document.getElementById('result-count').textContent=`${count} visite(s)`;document.getElementById('select-all-results').checked=false;updateResultSelection()}
-function updateResultSelection(){const selected=document.querySelectorAll('.result-selector:checked').length;document.getElementById('delete-selected-results').disabled=selected===0}
-async function deleteVisits(visits){if(!visits.length||!confirm(`Supprimer ${visits.length} visite(s) ?`))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits,run_ids:[]}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}async function deleteRuns(runIds){if(!runIds.length||!confirm('Supprimer toute cette exécution et ses visites ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'selected',visits:[],run_ids:runIds}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}}
+function resultSelector(runId,visitNumber=null){const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='result-selector';checkbox.dataset.runId=runId;checkbox.dataset.kind=visitNumber===null?'run':'visit';if(visitNumber!==null)checkbox.dataset.visitNumber=String(visitNumber);checkbox.addEventListener('change',updateResultSelection);return checkbox}
+function renderReports(){const body=document.getElementById('result-rows');body.replaceChildren();let visitCount=0;let emptyRunCount=0;for(const report of [...reports].reverse()){const runId=String(report.run_id||'');const results=Array.isArray(report.results)?report.results:[];if(!results.length){emptyRunCount++;const row=document.createElement('tr');const selectCell=document.createElement('td');selectCell.append(resultSelector(runId));const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(report.in_progress?'active-badge':report.success?'success':report.error?'failure':'missing-badge');badge.textContent=report.in_progress?'EN COURS':report.success?'TERMINÉE':report.error?'ÉCHEC':'SANS VISITE';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(report.started_at||''),cell('—'),cell(String(report.source||'')+(report.in_progress?' · EN COURS':'')),cell(report.execution_mode||'—'),cell('—'),cell('—'),outcome,cell(report.error||'','url-cell'),actions);body.append(row);continue}for(const result of [...results].reverse()){visitCount++;const row=document.createElement('tr');const selectCell=document.createElement('td');selectCell.append(resultSelector(runId,Number(result.visit_number)));const source=String(report.source||'')+(report.in_progress?' · EN COURS':'');const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(result.success?'success':'failure');badge.textContent=result.success?'SUCCÈS':'ÉCHEC';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Visite','danger',()=>deleteVisits([{run_id:runId,visit_number:Number(result.visit_number)}])),actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(result.started_at||''),cell(result.target_alias||result.target_id||'—'),cell(source),cell(resultLabel(report,result)),cell(result.initial_url||'','url-cell'),cell(result.final_url||'','url-cell'),outcome,cell(result.error||'','url-cell'),actions);body.append(row)}}if(!visitCount&&!emptyRunCount){const row=document.createElement('tr');const empty=cell('Aucun résultat.','empty');empty.colSpan=10;row.append(empty);body.append(row)}const counts=[`${visitCount} visite(s)`];if(emptyRunCount)counts.push(`${emptyRunCount} exécution(s) sans visite`);document.getElementById('result-count').textContent=counts.join(' · ');document.getElementById('select-all-results').checked=false;updateResultSelection()}
+function updateResultSelection(){const selectors=[...document.querySelectorAll('.result-selector')];const selected=selectors.filter(node=>node.checked).length;document.querySelectorAll('#result-rows input,#result-rows button').forEach(node=>{node.disabled=resultMutationPending});document.getElementById('select-all-results').disabled=resultMutationPending||selectors.length===0;document.getElementById('delete-selected-results').disabled=resultMutationPending||selected===0;document.getElementById('clear-results').disabled=resultMutationPending}
+function setResultMutationPending(pending){resultMutationPending=pending;document.getElementById('results-panel').setAttribute('aria-busy',String(pending));updateResultSelection()}
+async function deleteResultData(body,confirmation){if(!confirm(confirmation))return;setResultMutationPending(true);try{const value=await api('/api/results/delete',{method:'POST',body});reports=value.reports;databaseState=value.database||databaseState;renderReports();renderConnection();showNotice(value.message)}catch(error){showNotice(error.message,true)}finally{setResultMutationPending(false)}}
+async function deleteVisits(visits){if(!visits.length)return;await deleteResultData({action:'selected',visits,run_ids:[]},`Supprimer ${visits.length} visite(s) de Supabase ?`)}
+async function deleteRuns(runIds){if(!runIds.length)return;await deleteResultData({action:'selected',visits:[],run_ids:runIds},'Supprimer toute cette exécution et ses visites de Supabase ?')}
 async function refreshState(){try{const value=await api('/api/state');runState=value.run;databaseState=value.database;reports=value.reports;gateways=value.gateways;if(!document.getElementById('target-id').value)targets=value.targets;renderTargets();renderGateways();renderReports();renderConnection();renderRun()}catch(error){showNotice(error.message,true)}}
 document.getElementById('target-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('target-id').value;const payload={alias:document.getElementById('target-alias').value,url:document.getElementById('target-url').value,button_text:document.getElementById('target-button').value,second_button_text:document.getElementById('target-second-button').value,selected:document.getElementById('target-selected').checked};try{const value=await api(id?`/api/targets/${encodeURIComponent(id)}`:'/api/targets',{method:id?'PATCH':'POST',body:payload});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('target-cancel').addEventListener('click',resetTargetForm);for(const [id,mode] of [['targets-all','all'],['targets-none','none']])document.getElementById(id).addEventListener('click',async()=>{try{const value=await api('/api/targets/selection',{method:'POST',body:{mode}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
 document.getElementById('gateway-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('gateway-id').value;const wantsActive=document.getElementById('gateway-active').checked;const payload={alias:document.getElementById('gateway-alias').value,gateway:document.getElementById('gateway-secret').value,active:wantsActive};try{let value=await api(id?`/api/gateways/${encodeURIComponent(id)}`:'/api/gateways',{method:id?'PATCH':'POST',body:payload});gateways=value.gateways;if(id&&wantsActive&&!gateways.find(item=>item.id===id)?.active){value=await api(`/api/gateways/${encodeURIComponent(id)}/select`,{method:'POST',body:{}});gateways=value.gateways}resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('gateway-cancel').addEventListener('click',resetGatewayForm);
 document.getElementById('settings-form').addEventListener('submit',async event=>{event.preventDefault();const payload={execution_mode:document.querySelector('input[name="execution_mode"]:checked').value,repetition_count:Number(document.getElementById('repetition-count').value),repetition_min:Number(document.getElementById('repetition-min').value),repetition_max:Number(document.getElementById('repetition-max').value),interval_minutes:Number(document.getElementById('interval-minutes').value),schedule_enabled:document.getElementById('schedule-enabled').checked};try{const value=await api('/api/settings',{method:'POST',body:payload});showNotice(value.message)}catch(error){showNotice(error.message,true)}});
 document.getElementById('run-button').addEventListener('click',async()=>{try{const value=await api('/api/run',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});document.getElementById('stop-button').addEventListener('click',async()=>{try{const value=await api('/api/stop',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
-document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});document.getElementById('delete-selected-results').addEventListener('click',()=>{const visits=[...document.querySelectorAll('.result-selector:checked')].map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));deleteVisits(visits)});document.getElementById('clear-results').addEventListener('click',async()=>{if(!confirm('Effacer définitivement tout l’historique Supabase ?'))return;try{const value=await api('/api/results',{method:'DELETE',body:{action:'all'}});reports=value.reports;renderReports();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-let pollInProgress=false;async function pollStatus(){if(pollInProgress)return;pollInProgress=true;try{const value=await api('/api/status');const wasRunning=Boolean(runState.running);runState=value.run;renderRun();if(runState.running||wasRunning)await refreshState()}catch(error){showNotice(error.message,true)}finally{pollInProgress=false}}
+document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});document.getElementById('delete-selected-results').addEventListener('click',()=>{const selected=[...document.querySelectorAll('.result-selector:checked')];const visits=selected.filter(node=>node.dataset.kind==='visit').map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));const runIds=selected.filter(node=>node.dataset.kind==='run').map(node=>node.dataset.runId);deleteResultData({action:'selected',visits,run_ids:runIds},`Supprimer ${selected.length} élément(s) de Supabase ?`)});document.getElementById('clear-results').addEventListener('click',()=>deleteResultData({action:'all'},'Effacer définitivement tout l’historique Supabase ?'));
+let pollInProgress=false;async function pollStatus(){if(pollInProgress||resultMutationPending)return;pollInProgress=true;try{const value=await api('/api/status');const wasRunning=Boolean(runState.running);runState=value.run;renderRun();if(runState.running||wasRunning)await refreshState()}catch(error){showNotice(error.message,true)}finally{pollInProgress=false}}
 renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetGatewayForm();goToPage(pages.includes(location.hash.slice(1))?location.hash.slice(1):'home',false);window.setInterval(pollStatus,3000);
 </script>
 </body>
