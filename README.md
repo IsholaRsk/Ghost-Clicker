@@ -142,7 +142,7 @@ L’interface affiche :
 
 Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne durable dans Supabase. L’interface charge un historique récent pour rester réactive ; le CSV demande l’ensemble des rapports et visites disponibles.
 
-Depuis la console, l’administrateur peut supprimer une visite, plusieurs visites cochées, une exécution complète ou tout l’historique. Ces suppressions sont effectuées directement dans Supabase ; la suppression d’une exécution efface aussi ses visites associées.
+Depuis la console, l’administrateur peut supprimer une visite, plusieurs éléments cochés, une exécution complète — y compris une exécution sans visite — ou tout l’historique. Ces suppressions sont effectuées directement dans Supabase et restent disponibles pendant que le bot fonctionne ; la suppression d’une exécution efface aussi ses visites associées. Une exécution toujours active peut naturellement enregistrer de nouvelles visites après la suppression.
 
 ## Navigateur sur Render
 
