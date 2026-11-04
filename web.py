@@ -9,6 +9,7 @@ import html
 import io
 import json
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -46,6 +47,7 @@ STATE_LOCK = threading.Lock()
 REPORTS_LOCK = threading.Lock()
 DATABASE_LOCK = threading.Lock()
 GATEWAY_SECRETS_LOCK = threading.RLock()
+CAMPAIGN_LOCK = threading.RLock()
 GATEWAY_SECRETS_CACHE: dict[str, str] | None = None
 STOP_EVENT = threading.Event()
 DATABASE_STATE: dict[str, Any] = {
@@ -67,6 +69,9 @@ RUN_STATE: dict[str, Any] = {
     "completed_visits": 0,
     "continuous_window": 0,
     "window_repetition_count": 0,
+    "interval_campaign_active": False,
+    "interval_campaign_total": 0,
+    "interval_campaign_launched": 0,
 }
 
 DEFAULT_APP_SETTINGS: dict[str, Any] = {
@@ -78,10 +83,17 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "repetition_count": 1,
     "repetition_min": 1,
     "repetition_max": 10,
+    "interval_execution_count": 20,
+    "interval_duration_days": 1,
+    "interval_repetition_count": 1,
+    "interval_campaign": {},
 }
 SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 MAX_TARGET_ALIAS_LENGTH = 100
 MAX_GATEWAYS = 20
+MAX_INTERVAL_EXECUTIONS = 10_000
+MAX_INTERVAL_DURATION_DAYS = 365
+MAX_STORED_VISITS = 500
 
 
 def set_database_state(*, configured: bool, connected: bool, error: str = "") -> None:
@@ -501,6 +513,48 @@ def validated_target_record(
     }
 
 
+def normalize_interval_campaign(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    campaign_id = str(value.get("id", "")).strip()
+    if not SAFE_IDENTIFIER_PATTERN.fullmatch(campaign_id):
+        return {}
+    raw_schedule = value.get("scheduled_timestamps", [])
+    if not isinstance(raw_schedule, list):
+        return {}
+    scheduled_timestamps: list[float] = []
+    for raw_timestamp in raw_schedule[:MAX_INTERVAL_EXECUTIONS + 10]:
+        try:
+            timestamp = float(raw_timestamp)
+        except (TypeError, ValueError):
+            continue
+        if timestamp > 0:
+            scheduled_timestamps.append(timestamp)
+    scheduled_timestamps.sort()
+    total = bounded_integer(
+        value.get("total_executions"),
+        len(scheduled_timestamps),
+        1,
+        MAX_INTERVAL_EXECUTIONS,
+    )
+    launched = bounded_integer(
+        value.get("launched_executions"),
+        max(0, total - len(scheduled_timestamps)),
+        0,
+        total,
+    )
+    active = bool(value.get("active", False)) and bool(scheduled_timestamps)
+    return {
+        "id": campaign_id,
+        "active": active,
+        "started_at": str(value.get("started_at", ""))[:64],
+        "ends_at": str(value.get("ends_at", ""))[:64],
+        "total_executions": total,
+        "launched_executions": launched,
+        "scheduled_timestamps": scheduled_timestamps,
+    }
+
+
 def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
     mode = str(value.get("execution_mode", "fixed")).strip().lower()
     if mode not in EXECUTION_MODES:
@@ -528,6 +582,27 @@ def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
         ),
         "repetition_min": minimum,
         "repetition_max": maximum,
+        "interval_execution_count": bounded_integer(
+            value.get("interval_execution_count"),
+            20,
+            1,
+            MAX_INTERVAL_EXECUTIONS,
+        ),
+        "interval_duration_days": bounded_integer(
+            value.get("interval_duration_days"),
+            1,
+            1,
+            MAX_INTERVAL_DURATION_DAYS,
+        ),
+        "interval_repetition_count": bounded_integer(
+            value.get("interval_repetition_count"),
+            1,
+            1,
+            MAX_CONFIGURED_REPETITIONS,
+        ),
+        "interval_campaign": normalize_interval_campaign(
+            value.get("interval_campaign", {})
+        ),
     }
 
 
@@ -616,13 +691,42 @@ def load_reports(*, all_data: bool = False) -> list[dict[str, Any]]:
         return read_reports_unlocked()
 
 
+def retain_latest_visits(
+    reports: list[dict[str, Any]], maximum: int = MAX_STORED_VISITS
+) -> list[dict[str, Any]]:
+    """Conserve les visites les plus récentes sans créer de faux rapports vides."""
+
+    remaining = maximum
+    retained_reversed: list[dict[str, Any]] = []
+    for raw_report in reversed(reports):
+        report = dict(raw_report)
+        raw_results = report.get("results", [])
+        results = raw_results if isinstance(raw_results, list) else []
+        if results:
+            if remaining <= 0:
+                continue
+            retained_results = results[-remaining:]
+            report["results"] = retained_results
+            remaining -= len(retained_results)
+            retained_reversed.append(report)
+            continue
+        try:
+            completed_visits = int(report.get("completed_visits", 0))
+        except (TypeError, ValueError):
+            completed_visits = 0
+        if completed_visits <= 0:
+            retained_reversed.append(report)
+    retained_reversed.reverse()
+    return retained_reversed[-200:]
+
+
 def append_report(value: dict[str, Any]) -> None:
     report = dict(value)
     report.setdefault("run_id", secrets.token_urlsafe(12))
     with REPORTS_LOCK:
         reports = read_reports_unlocked()
         reports.append(report)
-        atomic_write_json(reports_path(), reports[-200:])
+        atomic_write_json(reports_path(), retain_latest_visits(reports))
     storage = supabase_storage()
     if storage is not None:
         try:
@@ -646,7 +750,7 @@ def upsert_report(value: dict[str, Any]) -> None:
                 break
         else:
             reports.append(value)
-        atomic_write_json(reports_path(), reports[-200:])
+        atomic_write_json(reports_path(), retain_latest_visits(reports))
     storage = supabase_storage()
     if storage is not None:
         try:
@@ -921,7 +1025,11 @@ def read_browser_configuration(
         return None, str(exc)
 
 
-def execute_job(source: str) -> None:
+def execute_job(
+    source: str,
+    execution_mode_override: str | None = None,
+    repetition_count_override: int | None = None,
+) -> None:
     run_id = ""
     try:
         app_settings = load_app_settings()
@@ -931,13 +1039,17 @@ def execute_job(source: str) -> None:
         if not targets:
             raise ConfigurationError("Aucune URL n'est sélectionnée.")
 
-        execution_mode = str(app_settings["execution_mode"])
-        repetition_count = resolve_repetition_count(
-            execution_mode,
-            int(app_settings["repetition_count"]),
-            int(app_settings["repetition_min"]),
-            int(app_settings["repetition_max"]),
+        execution_mode = execution_mode_override or str(
+            app_settings["execution_mode"]
         )
+        repetition_count = repetition_count_override
+        if repetition_count is None:
+            repetition_count = resolve_repetition_count(
+                execution_mode,
+                int(app_settings["repetition_count"]),
+                int(app_settings["repetition_min"]),
+                int(app_settings["repetition_max"]),
+            )
         run_id = secrets.token_urlsafe(12)
         with STATE_LOCK:
             RUN_STATE.update(
@@ -1025,7 +1137,12 @@ def execute_job(source: str) -> None:
         STOP_EVENT.clear()
 
 
-def start_job(source: str) -> bool:
+def start_job(
+    source: str,
+    *,
+    execution_mode_override: str | None = None,
+    repetition_count_override: int | None = None,
+) -> bool:
     with STATE_LOCK:
         if RUN_STATE["running"]:
             return False
@@ -1037,39 +1154,224 @@ def start_job(source: str) -> bool:
             started_at=now_iso(),
             finished_at="",
             last_error="",
-            execution_mode="fixed",
-            planned_repetitions=1,
+            execution_mode=execution_mode_override or "fixed",
+            planned_repetitions=(
+                repetition_count_override
+                if repetition_count_override is not None
+                else 1
+            ),
             completed_repetitions=0,
             completed_visits=0,
             continuous_window=0,
             window_repetition_count=0,
         )
-    thread = threading.Thread(target=execute_job, args=(source,), daemon=True)
+    thread = threading.Thread(
+        target=execute_job,
+        args=(source, execution_mode_override, repetition_count_override),
+        daemon=True,
+    )
     thread.start()
     return True
 
 
-def request_job_stop() -> bool:
+def build_interval_campaign(
+    requested_executions: int,
+    duration_days: int,
+    *,
+    now_timestamp: float | None = None,
+) -> dict[str, Any]:
+    if not 1 <= requested_executions <= MAX_INTERVAL_EXECUTIONS:
+        raise ConfigurationError(
+            f"Le nombre d'exécutions doit être compris entre 1 et "
+            f"{MAX_INTERVAL_EXECUTIONS}."
+        )
+    if not 1 <= duration_days <= MAX_INTERVAL_DURATION_DAYS:
+        raise ConfigurationError(
+            f"La durée doit être comprise entre 1 et "
+            f"{MAX_INTERVAL_DURATION_DAYS} jours."
+        )
+    started_timestamp = time.time() if now_timestamp is None else now_timestamp
+    total_executions = random.randint(
+        max(1, requested_executions - 10),
+        min(MAX_INTERVAL_EXECUTIONS, requested_executions + 10),
+    )
+    duration_seconds = duration_days * 24 * 60 * 60
+    scheduled_timestamps = sorted(
+        started_timestamp + random.uniform(0, duration_seconds)
+        for _index in range(total_executions)
+    )
+    ends_timestamp = started_timestamp + duration_seconds
+    return {
+        "id": f"campaign_{secrets.token_urlsafe(12)}",
+        "active": True,
+        "started_at": datetime.fromtimestamp(started_timestamp)
+        .astimezone()
+        .isoformat(timespec="seconds"),
+        "ends_at": datetime.fromtimestamp(ends_timestamp)
+        .astimezone()
+        .isoformat(timespec="seconds"),
+        "total_executions": total_executions,
+        "launched_executions": 0,
+        "scheduled_timestamps": scheduled_timestamps,
+    }
+
+
+def update_interval_campaign_state(campaign: dict[str, Any]) -> None:
+    schedule = campaign.get("scheduled_timestamps", [])
+    next_timestamp = schedule[0] if campaign.get("active") and schedule else None
     with STATE_LOCK:
-        if not RUN_STATE["running"]:
+        RUN_STATE.update(
+            interval_campaign_active=bool(campaign.get("active", False)),
+            interval_campaign_total=int(campaign.get("total_executions", 0)),
+            interval_campaign_launched=int(
+                campaign.get("launched_executions", 0)
+            ),
+            next_run_at=(
+                datetime.fromtimestamp(float(next_timestamp))
+                .astimezone()
+                .isoformat(timespec="seconds")
+                if next_timestamp is not None
+                else ""
+            ),
+        )
+
+
+def start_interval_campaign() -> dict[str, Any]:
+    with CAMPAIGN_LOCK:
+        with STATE_LOCK:
+            if RUN_STATE["running"]:
+                raise ConfigurationError("Une exécution est déjà en cours.")
+        settings = load_app_settings()
+        active_campaign = settings.get("interval_campaign", {})
+        if isinstance(active_campaign, dict) and active_campaign.get("active"):
+            raise ConfigurationError("Une campagne Intervalle est déjà active.")
+        campaign = build_interval_campaign(
+            int(settings["interval_execution_count"]),
+            int(settings["interval_duration_days"]),
+        )
+        settings["interval_campaign"] = campaign
+        save_app_settings(settings)
+        update_interval_campaign_state(campaign)
+    record_database_event(
+        "interval_campaign_started",
+        {
+            "campaign_id": campaign["id"],
+            "requested_executions": settings["interval_execution_count"],
+            "total_executions": campaign["total_executions"],
+            "duration_days": settings["interval_duration_days"],
+            "repetitions_per_execution": settings[
+                "interval_repetition_count"
+            ],
+            "started_at": campaign["started_at"],
+            "ends_at": campaign["ends_at"],
+        },
+    )
+    return campaign
+
+
+def process_interval_campaign(now_timestamp: float | None = None) -> bool:
+    """Lance au plus une exécution arrivée à échéance."""
+
+    current_timestamp = time.time() if now_timestamp is None else now_timestamp
+    with CAMPAIGN_LOCK:
+        settings = load_app_settings()
+        campaign = settings.get("interval_campaign", {})
+        if not isinstance(campaign, dict) or not campaign.get("active"):
+            update_interval_campaign_state({})
             return False
-        RUN_STATE["stop_requested"] = True
-        STOP_EVENT.set()
-        return True
+        schedule = list(campaign.get("scheduled_timestamps", []))
+        if not schedule:
+            campaign["active"] = False
+            settings["interval_campaign"] = campaign
+            save_app_settings(settings)
+            update_interval_campaign_state(campaign)
+            return False
+        update_interval_campaign_state(campaign)
+        if float(schedule[0]) > current_timestamp:
+            return False
+        with STATE_LOCK:
+            if RUN_STATE["running"]:
+                return False
+        execution_number = int(campaign.get("launched_executions", 0)) + 1
+        total_executions = int(campaign.get("total_executions", len(schedule)))
+        due_timestamp = schedule.pop(0)
+        campaign["scheduled_timestamps"] = schedule
+        campaign["launched_executions"] = execution_number
+        campaign["active"] = bool(schedule)
+        settings["interval_campaign"] = campaign
+        save_app_settings(settings)
+        started = start_job(
+            f"intervalle {execution_number}/{total_executions}",
+            execution_mode_override="range",
+            repetition_count_override=int(settings["interval_repetition_count"]),
+        )
+        if not started:
+            schedule.insert(0, due_timestamp)
+            campaign["scheduled_timestamps"] = schedule
+            campaign["launched_executions"] = execution_number - 1
+            campaign["active"] = True
+            settings["interval_campaign"] = campaign
+            save_app_settings(settings)
+            update_interval_campaign_state(campaign)
+            return False
+        update_interval_campaign_state(campaign)
+    record_database_event(
+        "interval_execution_started",
+        {
+            "campaign_id": campaign.get("id", ""),
+            "execution_number": execution_number,
+            "total_executions": total_executions,
+            "scheduled_at": datetime.fromtimestamp(float(due_timestamp))
+            .astimezone()
+            .isoformat(timespec="seconds"),
+            "started_at": now_iso(),
+        },
+    )
+    return True
+
+
+def request_job_stop() -> bool:
+    campaign_cancelled = False
+    with CAMPAIGN_LOCK:
+        settings = load_app_settings()
+        campaign = settings.get("interval_campaign", {})
+        if isinstance(campaign, dict) and campaign.get("active"):
+            campaign["active"] = False
+            campaign["scheduled_timestamps"] = []
+            settings["interval_campaign"] = campaign
+            save_app_settings(settings)
+            update_interval_campaign_state(campaign)
+            campaign_cancelled = True
+    with STATE_LOCK:
+        running = bool(RUN_STATE["running"])
+        if running:
+            RUN_STATE["stop_requested"] = True
+            STOP_EVENT.set()
+    return running or campaign_cancelled
 
 
 def scheduler_loop() -> None:
     next_run_timestamp: float | None = None
     while True:
         app_settings = load_app_settings()
-        enabled = bool(app_settings.get("schedule_enabled", False))
+        campaign = app_settings.get("interval_campaign", {})
+        if isinstance(campaign, dict) and campaign.get("active"):
+            next_run_timestamp = None
+            process_interval_campaign()
+            time.sleep(15)
+            continue
+
+        enabled = bool(app_settings.get("schedule_enabled", False)) and str(
+            app_settings.get("execution_mode", "fixed")
+        ) != "range"
         interval = max(60, int(app_settings.get("interval_minutes", 60)))
         now = time.time()
 
         if not enabled:
             next_run_timestamp = None
             with STATE_LOCK:
-                RUN_STATE["next_run_at"] = ""
+                if not RUN_STATE.get("interval_campaign_active"):
+                    RUN_STATE["next_run_at"] = ""
         else:
             if next_run_timestamp is None:
                 next_run_timestamp = now + interval * 60
@@ -1089,6 +1391,12 @@ def require_idle_configuration() -> None:
             raise ConfigurationError(
                 "Attendez l'arrêt de l'exécution avant cette modification."
             )
+    settings = load_app_settings()
+    campaign = settings.get("interval_campaign", {})
+    if isinstance(campaign, dict) and campaign.get("active"):
+        raise ConfigurationError(
+            "Arrêtez la campagne Intervalle avant cette modification."
+        )
 
 
 def request_json_object() -> dict[str, Any]:
@@ -1570,19 +1878,49 @@ def api_update_settings() -> tuple[Response, int] | Response:
         repetition_count = int(payload.get("repetition_count", 1))
         repetition_min = int(payload.get("repetition_min", 1))
         repetition_max = int(payload.get("repetition_max", 10))
-        resolve_repetition_count(
-            execution_mode,
-            repetition_count,
-            repetition_min,
-            repetition_max,
+        interval_execution_count = int(
+            payload.get("interval_execution_count", 20)
         )
+        interval_duration_days = int(payload.get("interval_duration_days", 1))
+        interval_repetition_count = int(
+            payload.get("interval_repetition_count", 1)
+        )
+        if execution_mode not in EXECUTION_MODES:
+            raise ConfigurationError("Le mode d'exécution est invalide.")
+        if execution_mode != "range":
+            resolve_repetition_count(
+                execution_mode,
+                repetition_count,
+                repetition_min,
+                repetition_max,
+            )
+        if not 1 <= interval_execution_count <= MAX_INTERVAL_EXECUTIONS:
+            raise ConfigurationError(
+                f"Le nombre d'exécutions doit être compris entre 1 et "
+                f"{MAX_INTERVAL_EXECUTIONS}."
+            )
+        if not 1 <= interval_duration_days <= MAX_INTERVAL_DURATION_DAYS:
+            raise ConfigurationError(
+                f"La durée doit être comprise entre 1 et "
+                f"{MAX_INTERVAL_DURATION_DAYS} jours."
+            )
+        if not 1 <= interval_repetition_count <= MAX_CONFIGURED_REPETITIONS:
+            raise ConfigurationError(
+                "Le nombre de répétitions par exécution est invalide."
+            )
         current.update(
-            schedule_enabled=bool(payload.get("schedule_enabled", False)),
+            schedule_enabled=(
+                bool(payload.get("schedule_enabled", False))
+                and execution_mode != "range"
+            ),
             interval_minutes=interval,
             execution_mode=execution_mode,
             repetition_count=repetition_count,
             repetition_min=repetition_min,
             repetition_max=repetition_max,
+            interval_execution_count=interval_execution_count,
+            interval_duration_days=interval_duration_days,
+            interval_repetition_count=interval_repetition_count,
         )
         save_app_settings(current)
         record_database_event(
@@ -1594,6 +1932,9 @@ def api_update_settings() -> tuple[Response, int] | Response:
                 "repetition_count": repetition_count,
                 "repetition_min": repetition_min,
                 "repetition_max": repetition_max,
+                "interval_execution_count": interval_execution_count,
+                "interval_duration_days": interval_duration_days,
+                "interval_repetition_count": interval_repetition_count,
                 "updated_at": now_iso(),
             },
         )
@@ -1614,6 +1955,17 @@ def api_run_now() -> tuple[Response, int] | Response:
         targets = targets_from_settings(app_settings)
         if not targets:
             raise ConfigurationError("Sélectionnez au moins une URL.")
+        if app_settings.get("execution_mode") == "range":
+            campaign = start_interval_campaign()
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": (
+                        f"Campagne démarrée : {campaign['total_executions']} "
+                        "exécution(s) répartie(s) aléatoirement."
+                    ),
+                }
+            )
         if not start_job("manuel"):
             raise ConfigurationError("Une exécution est déjà en cours.")
         return jsonify({"ok": True, "message": "Exécution démarrée."})
@@ -1633,7 +1985,7 @@ def api_stop_now() -> tuple[Response, int] | Response:
         return jsonify(
             {
                 "ok": True,
-                "message": "Arrêt demandé. La visite en cours va se terminer.",
+                "message": "Arrêt pris en compte. La visite en cours se terminera proprement et toute campagne active est annulée.",
             }
         )
     except ConfigurationError as exc:
@@ -1787,6 +2139,7 @@ def upload_targets() -> Response:
 def update_settings() -> Response:
     try:
         require_csrf()
+        require_idle_configuration()
         current = load_app_settings()
         target_records = list(current.get("targets", []))
         if "targets" in request.form:
@@ -1821,30 +2174,54 @@ def update_settings() -> Response:
             repetition_max = int(
                 request.form.get("repetition_max", "10").strip()
             )
+            interval_execution_count = int(
+                request.form.get("interval_execution_count", "20").strip()
+            )
+            interval_duration_days = int(
+                request.form.get("interval_duration_days", "1").strip()
+            )
+            interval_repetition_count = int(
+                request.form.get("interval_repetition_count", "1").strip()
+            )
         except ValueError as exc:
             raise ConfigurationError(
-                "Les répétitions doivent être des nombres entiers."
+                "Les paramètres d'exécution doivent être des nombres entiers."
             ) from exc
-        resolve_repetition_count(
-            execution_mode,
-            repetition_count,
-            repetition_min,
-            repetition_max,
-        )
+        if execution_mode not in EXECUTION_MODES:
+            raise ConfigurationError("Le mode d'exécution est invalide.")
+        if execution_mode != "range":
+            resolve_repetition_count(
+                execution_mode,
+                repetition_count,
+                repetition_min,
+                repetition_max,
+            )
+        if not 1 <= interval_execution_count <= MAX_INTERVAL_EXECUTIONS:
+            raise ConfigurationError("Le nombre d'exécutions est invalide.")
+        if not 1 <= interval_duration_days <= MAX_INTERVAL_DURATION_DAYS:
+            raise ConfigurationError("La durée en jours est invalide.")
+        if not 1 <= interval_repetition_count <= MAX_CONFIGURED_REPETITIONS:
+            raise ConfigurationError(
+                "Le nombre de répétitions par exécution est invalide."
+            )
 
-        schedule_enabled = request.form.get("schedule_enabled") == "on"
-        save_app_settings(
-            {
-                "targets": target_records,
-                "gateways": current.get("gateways", []),
-                "schedule_enabled": schedule_enabled,
-                "interval_minutes": interval,
-                "execution_mode": execution_mode,
-                "repetition_count": repetition_count,
-                "repetition_min": repetition_min,
-                "repetition_max": repetition_max,
-            }
+        schedule_enabled = (
+            request.form.get("schedule_enabled") == "on"
+            and execution_mode != "range"
         )
+        current.update(
+            targets=target_records,
+            schedule_enabled=schedule_enabled,
+            interval_minutes=interval,
+            execution_mode=execution_mode,
+            repetition_count=repetition_count,
+            repetition_min=repetition_min,
+            repetition_max=repetition_max,
+            interval_execution_count=interval_execution_count,
+            interval_duration_days=interval_duration_days,
+            interval_repetition_count=interval_repetition_count,
+        )
+        save_app_settings(current)
         record_database_event(
             "settings_updated",
             {
@@ -1855,6 +2232,9 @@ def update_settings() -> Response:
                 "repetition_count": repetition_count,
                 "repetition_min": repetition_min,
                 "repetition_max": repetition_max,
+                "interval_execution_count": interval_execution_count,
+                "interval_duration_days": interval_duration_days,
+                "interval_repetition_count": interval_repetition_count,
                 "updated_at": now_iso(),
             },
         )
@@ -1873,7 +2253,11 @@ def run_now() -> Response:
         targets = targets_from_settings(app_settings)
         if not targets:
             raise ConfigurationError("Sélectionnez au moins une URL.")
-        started = start_job("manuel")
+        if app_settings.get("execution_mode") == "range":
+            start_interval_campaign()
+            started = True
+        else:
+            started = start_job("manuel")
         return redirect(
             url_for("home", started="1" if started else "0"), code=303
         )
@@ -2035,13 +2419,13 @@ def home() -> str:
 .notices{position:fixed;z-index:50;top:78px;left:50%;transform:translateX(-50%);width:min(700px,calc(100% - 28px));display:grid}.notice{padding:13px 15px;border:1px solid #2b3b4d;border-left:3px solid #7893b3;background:#151d27;color:#c6d2df;font-size:15px}.notice.error{border-color:#5c2c2c;border-left-color:var(--danger);background:var(--danger-bg);color:#ffd0cc}
 .app-viewport{height:calc(100dvh - var(--top-h) - var(--nav-h));overflow:hidden}.app-track{height:100%}.app-page{display:none;height:100%;overflow-y:auto;overscroll-behavior:contain;padding:24px max(18px,calc((100% - 1200px)/2)) 34px;scrollbar-gutter:stable}.app-page.active{display:block}.page-head{margin-bottom:20px}.eyebrow{display:block;margin-bottom:7px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1,h2,p{margin-top:0}h1{margin-bottom:7px;font-size:32px;line-height:1.15;letter-spacing:-.035em}h2{margin:0;font-size:22px;letter-spacing:-.02em}.page-head p,.panel-head p,.hint{color:var(--muted)}.page-head p{margin:0;font-size:16px}
 .status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:24px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.stat{min-width:0;padding:18px 20px;border-right:1px solid var(--line)}.stat:last-child{border-right:0}.stat-label{display:block;margin-bottom:8px;color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}.stat-value{display:flex;align-items:center;gap:9px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:16px;font-weight:700}.status-dot{width:10px;height:10px;flex:none;border-radius:50%}.status-dot.idle,.status-dot.ready{background:var(--success)}.status-dot.running{background:#7da6e3;animation:pulse 1.7s infinite}.status-dot.warning{background:var(--warning)}@keyframes pulse{50%{opacity:.35}}
-.panel{margin-bottom:30px;border-top:1px solid var(--line)}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:18px 0 15px;border-bottom:1px solid var(--line)}.panel-head p{margin:6px 0 0;font-size:14px}.panel-body{padding:20px 0 6px}.count{padding-top:4px;color:var(--muted);font-size:13px;white-space:nowrap}.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}.wide{grid-column:1/-1}
+.panel{margin-bottom:30px;border-top:1px solid var(--line)}.panel[hidden],.mode-parameters[hidden],.mode-settings[hidden],.recurring-settings[hidden]{display:none}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:18px 0 15px;border-bottom:1px solid var(--line)}.panel-head p{margin:6px 0 0;font-size:14px}.panel-body{padding:20px 0 6px}.page-head-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}.count{padding-top:4px;color:var(--muted);font-size:13px;white-space:nowrap}.two-col{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px}.wide{grid-column:1/-1}
 label{display:block;margin-bottom:7px;color:#d5dae0;font-size:14px;font-weight:700}input,select{width:100%;height:48px;border:1px solid var(--strong);border-radius:5px;background:#101317;color:var(--ink);padding:0 13px;outline:none}input:focus,select:focus{border-color:var(--focus);box-shadow:0 0 0 2px rgba(126,156,200,.13)}input[type=checkbox],input[type=radio]{width:19px;height:19px;padding:0;accent-color:#dce3ec}.check-row{display:flex;align-items:center;gap:10px;margin-top:13px}.check-row label{margin:0}
 button,.button{min-height:44px;border:1px solid var(--ink);border-radius:5px;background:var(--ink);color:#11151a;padding:0 16px;font-size:14px;font-weight:800;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}button:hover,.button:hover{opacity:.86}button:disabled{cursor:not-allowed;opacity:.4}.secondary{border-color:var(--strong);background:transparent;color:var(--ink)}.danger{border-color:#713b3b;background:transparent;color:var(--danger)}.small{min-height:38px;padding:0 11px;font-size:12px}.actions,.form-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.form-actions{margin-top:18px}.badge{display:inline-block;font-size:12px;font-weight:800}.success{color:var(--success)}.failure{color:var(--danger)}.active-badge{color:#9bbce8}.missing-badge{color:var(--warning)}
-.mode-options{display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:18px;border-top:1px solid var(--line)}.mode-option{display:flex;align-items:flex-start;gap:10px;padding:14px 12px;border-bottom:1px solid var(--line)}.mode-option span{font-size:14px}.mode-option small{display:block;color:var(--muted);font-size:13px;font-weight:400}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.run-specs{display:grid;margin:0 0 20px}.run-specs div{display:flex;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:14px}.run-specs dd{margin:0;text-align:right;font-size:14px;font-weight:700}
+.mode-options{display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:18px;border-top:1px solid var(--line)}.mode-option{display:flex;align-items:flex-start;gap:10px;padding:14px 12px;border-bottom:1px solid var(--line);cursor:pointer}.mode-option span{font-size:14px}.mode-option small{display:block;color:var(--muted);font-size:13px;font-weight:400}.mode-parameters{padding-top:4px}.mode-settings,.recurring-settings{padding:16px 0;border-bottom:1px solid var(--line)}.repeat-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.run-specs{display:grid;margin:0 0 20px}.run-specs div{display:flex;justify-content:space-between;gap:18px;padding:12px 0;border-bottom:1px solid var(--line)}.run-specs dt{color:var(--muted);font-size:14px}.run-specs dd{margin:0;text-align:right;font-size:14px;font-weight:700}
 .table-wrap{overflow:auto}table{width:100%;min-width:1050px;border-collapse:collapse}th,td{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;z-index:2;background:var(--soft);color:var(--muted);font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}td{font-size:14px}tbody tr:hover{background:#191d22}.url-cell{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row-actions{display:flex;gap:7px}.target-selected,.gateway-active{background:#171d1a}.empty{padding:36px;text-align:center;color:var(--muted)}
 .bottom-nav{height:calc(var(--nav-h) + env(safe-area-inset-bottom));position:fixed;z-index:40;left:0;right:0;bottom:0;padding:0 max(12px,calc((100% - 760px)/2)) env(safe-area-inset-bottom);border-top:1px solid var(--line);background:#111418;display:grid;grid-template-columns:repeat(5,1fr)}.nav-item{min-width:0;border:0;border-top:2px solid transparent;background:transparent;color:var(--muted);border-radius:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:7px 3px;font-size:12px;font-weight:700}.nav-item svg{width:25px;height:25px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.nav-item.active{color:var(--ink);border-top-color:var(--ink);background:transparent}.nav-item:hover{opacity:1;color:var(--ink);background:transparent}.footer-note{color:var(--muted);font-size:14px;text-align:center;padding:10px 0}
-@media(max-width:800px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}.two-col,.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.mode-options,.repeat-fields{grid-template-columns:1fr}.app-page{padding-left:15px;padding-right:15px}}
+@media(max-width:800px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line)}.two-col,.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.mode-options,.repeat-fields{grid-template-columns:1fr}.page-head-actions{align-items:flex-start;flex-direction:column}.app-page{padding-left:15px;padding-right:15px}}
 @media(max-width:440px){:root{--nav-h:80px;--top-h:64px}.page-head{margin-bottom:16px}h1{font-size:28px}.panel-head{padding:16px 0 14px}.panel-body{padding:18px 0 4px}.stat{padding:15px}.nav-item{font-size:11px}.nav-item svg{width:23px;height:23px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important}}
 </style>
@@ -2057,25 +2441,25 @@ button,.button{min-height:44px;border:1px solid var(--ink);border-radius:5px;bac
 </section>
 
 <section class="app-page" data-page="targets" aria-label="Cibles">
-<div class="page-head"><span class="eyebrow">Cibles</span><h1>Bibliothèque d’URL</h1><p>Ajoutez, modifiez et choisissez les URL utilisées lors de chaque lancement.</p></div>
-<section class="panel"><header class="panel-head"><div><h2 id="target-form-title">Nouvelle cible</h2><p>Sans libellé, le bot visite simplement l’URL sans effectuer de clic.</p></div><span id="target-count" class="count">__TARGET_COUNT__ cible(s)</span></header><div class="panel-body"><form id="target-form"><input id="target-id" type="hidden"><div class="form-grid"><div><label for="target-alias">Pseudo</label><input id="target-alias" maxlength="100" placeholder="Page d’accueil" required></div><div><label for="target-url">URL</label><input id="target-url" type="url" placeholder="https://site.example/page" required></div><div><label for="target-button">Premier libellé facultatif</label><input id="target-button" placeholder="Continuer"></div><div><label for="target-second-button">Second libellé facultatif</label><input id="target-second-button" placeholder="Confirmer"></div></div><div class="check-row"><input id="target-selected" type="checkbox" checked><label for="target-selected">Utiliser lors des prochains lancements</label></div><div class="form-actions"><button data-config id="target-submit" type="submit">Ajouter</button><button data-config id="target-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
-<section class="panel"><header class="panel-head"><div class="actions"><button data-config id="targets-all" class="secondary small" type="button">Tout sélectionner</button><button data-config id="targets-none" class="secondary small" type="button">Tout désélectionner</button></div><span id="selected-target-count" class="count">__SELECTED_COUNT__ sélectionnée(s)</span></header><div class="table-wrap"><table><thead><tr><th>Utiliser</th><th>Pseudo</th><th>URL</th><th>Premier libellé</th><th>Second libellé</th><th>Actions</th></tr></thead><tbody id="target-rows"></tbody></table></div></section>
+<div class="page-head page-head-actions"><div><span class="eyebrow">Cibles</span><h1>Bibliothèque d’URL</h1><p>Ajoutez, modifiez et choisissez les URL utilisées lors de chaque lancement.</p></div><button data-config id="show-target-editor" class="secondary" type="button">Nouvelle cible</button></div>
+<section id="target-editor" class="panel" hidden><header class="panel-head"><div><h2 id="target-form-title">Nouvelle cible</h2><p>Sans libellé, le bot visite simplement l’URL sans effectuer de clic.</p></div></header><div class="panel-body"><form id="target-form"><input id="target-id" type="hidden"><div class="form-grid"><div><label for="target-alias">Pseudo</label><input id="target-alias" maxlength="100" placeholder="Page d’accueil" required></div><div><label for="target-url">URL</label><input id="target-url" type="url" placeholder="https://site.example/page" required></div><div><label for="target-button">Premier libellé facultatif</label><input id="target-button" placeholder="Continuer"></div><div><label for="target-second-button">Second libellé facultatif</label><input id="target-second-button" placeholder="Confirmer"></div></div><div class="check-row"><input id="target-selected" type="checkbox" checked><label for="target-selected">Utiliser lors des prochains lancements</label></div><div class="form-actions"><button data-config id="target-submit" type="submit">Ajouter</button><button data-config id="target-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div class="actions"><button data-config id="targets-all" class="secondary small" type="button">Tout sélectionner</button><button data-config id="targets-none" class="secondary small" type="button">Tout désélectionner</button></div><div class="count"><span id="target-count">__TARGET_COUNT__ cible(s)</span> · <span id="selected-target-count">__SELECTED_COUNT__ sélectionnée(s)</span></div></header><div class="table-wrap"><table><thead><tr><th>Utiliser</th><th>Pseudo</th><th>URL</th><th>Premier libellé</th><th>Second libellé</th><th>Actions</th></tr></thead><tbody id="target-rows"></tbody></table></div></section>
 </section>
 
 <section class="app-page" data-page="gateways" aria-label="Passerelles">
-<div class="page-head"><span class="eyebrow">Réseau</span><h1>Passerelles Rayobyte</h1><p>Les pseudos, la sélection active et les identifiants sont conservés durablement. Les identifiants sont chiffrés dans Supabase Vault et ne sont jamais affichés dans l’interface.</p></div>
-<section class="panel"><header class="panel-head"><div><h2 id="gateway-form-title">Nouvelle passerelle</h2><p>Une seule passerelle peut être active à la fois.</p></div><span id="gateway-count" class="count">0 passerelle</span></header><div class="panel-body"><form id="gateway-form"><input id="gateway-id" type="hidden"><div class="form-grid"><div><label for="gateway-alias">Pseudo</label><input id="gateway-alias" maxlength="100" placeholder="Rayobyte principale" required></div><div><label for="gateway-secret">Identifiants</label><input id="gateway-secret" type="password" autocomplete="off" placeholder="username:password@host:port"></div></div><div class="check-row"><input id="gateway-active" type="checkbox"><label for="gateway-active">Définir comme passerelle active</label></div><p class="hint">En modification, laissez les identifiants vides pour conserver la valeur enregistrée dans Supabase Vault.</p><div class="form-actions"><button data-config id="gateway-submit" type="submit">Ajouter</button><button data-config id="gateway-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
-<section class="panel"><header class="panel-head"><div><h2>Passerelles enregistrées</h2><p>Une passerelle enregistrée reste disponible après les redémarrages et redéploiements.</p></div></header><div class="table-wrap"><table><thead><tr><th>Active</th><th>Pseudo</th><th>Identifiants</th><th>Actions</th></tr></thead><tbody id="gateway-rows"></tbody></table></div></section>
+<div class="page-head page-head-actions"><div><span class="eyebrow">Réseau</span><h1>Passerelles Rayobyte</h1><p>Les pseudos, la sélection active et les identifiants sont conservés durablement. Les identifiants sont chiffrés dans Supabase Vault et ne sont jamais affichés dans l’interface.</p></div><button data-config id="show-gateway-editor" class="secondary" type="button">Nouvelle passerelle</button></div>
+<section id="gateway-editor" class="panel" hidden><header class="panel-head"><div><h2 id="gateway-form-title">Nouvelle passerelle</h2><p>Une seule passerelle peut être active à la fois.</p></div></header><div class="panel-body"><form id="gateway-form"><input id="gateway-id" type="hidden"><div class="form-grid"><div><label for="gateway-alias">Pseudo</label><input id="gateway-alias" maxlength="100" placeholder="Rayobyte principale" required></div><div><label for="gateway-secret">Identifiants</label><input id="gateway-secret" type="password" autocomplete="off" placeholder="username:password@host:port"></div></div><div class="check-row"><input id="gateway-active" type="checkbox"><label for="gateway-active">Définir comme passerelle active</label></div><p class="hint">En modification, laissez les identifiants vides pour conserver la valeur enregistrée dans Supabase Vault.</p><div class="form-actions"><button data-config id="gateway-submit" type="submit">Ajouter</button><button data-config id="gateway-cancel" class="secondary" type="button" hidden>Annuler</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div><h2>Passerelles enregistrées</h2><p>Une passerelle enregistrée reste disponible après les redémarrages et redéploiements.</p></div><span id="gateway-count" class="count">0 passerelle</span></header><div class="table-wrap"><table><thead><tr><th>Active</th><th>Pseudo</th><th>Identifiants</th><th>Actions</th></tr></thead><tbody id="gateway-rows"></tbody></table></div></section>
 </section>
 
 <section class="app-page" data-page="results" aria-label="Résultats">
-<div class="page-head"><span class="eyebrow">Historique</span><h1>Résultats Supabase</h1><p>Consultez et supprimez les visites directement depuis l’application.</p></div>
+<div class="page-head"><span class="eyebrow">Historique</span><h1>Résultats Supabase</h1><p>Les 500 visites les plus récentes sont conservées dans le tableau et le CSV.</p></div>
 <section id="results-panel" class="panel" aria-busy="false"><header class="panel-head"><div><div class="actions"><button id="delete-selected-results" class="danger small" type="button" disabled>Supprimer la sélection</button><button id="clear-results" class="danger small" type="button">Tout effacer</button><a class="button secondary small" href="/results.csv">Télécharger le CSV</a></div><p>La suppression reste disponible pendant une exécution. Les nouvelles visites continueront à apparaître.</p></div><span id="result-count" class="count">0 visite</span></header><div class="table-wrap"><table><thead><tr><th><input id="select-all-results" type="checkbox" aria-label="Tout sélectionner"></th><th>Date</th><th>Pseudo</th><th>Source</th><th>Répétition</th><th>URL initiale</th><th>URL finale</th><th>Résultat</th><th>Erreur</th><th>Actions</th></tr></thead><tbody id="result-rows"></tbody></table></div></section>
 </section>
 
 <section class="app-page" data-page="settings" aria-label="Réglages">
 <div class="page-head"><span class="eyebrow">Réglages</span><h1>Exécution et planification</h1><p>Configurez les répétitions et les lancements automatiques.</p></div>
-<section class="panel"><header class="panel-head"><div><h2>Mode d’exécution</h2><p>La sélection des URL et de la passerelle est gérée dans leurs onglets.</p></div></header><div class="panel-body"><form id="settings-form"><label>Mode de répétition</label><div class="mode-options"><label class="mode-option"><input type="radio" name="execution_mode" value="fixed" __FIXED_CHECKED__><span>Nombre fixe<small>Valeur exacte.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="range" __RANGE_CHECKED__><span>Intervalle<small>Total tiré min/max.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="continuous" __CONTINUOUS_CHECKED__><span>Continu<small>Cycles de cinq minutes.</small></span></label></div><div class="repeat-fields"><div><label for="repetition-count">Nombre fixe</label><input id="repetition-count" type="number" min="1" max="10000" value="__REPETITION_COUNT__"></div><div><label for="repetition-min">Minimum</label><input id="repetition-min" type="number" min="1" max="10000" value="__REPETITION_MIN__"></div><div><label for="repetition-max">Maximum</label><input id="repetition-max" type="number" min="1" max="10000" value="__REPETITION_MAX__"></div></div><div style="margin-top:12px"><label for="interval-minutes">Intervalle planifié en minutes</label><input id="interval-minutes" type="number" min="60" max="10080" value="__INTERVAL__"></div><div class="check-row"><input id="schedule-enabled" type="checkbox" __SCHEDULE_CHECKED__><label for="schedule-enabled">Activer la planification</label></div><div class="form-actions"><button data-config type="submit">Enregistrer les réglages</button></div></form></div></section>
+<section class="panel"><header class="panel-head"><div><h2>Mode d’exécution</h2><p>Cliquez sur un mode pour afficher uniquement ses paramètres.</p></div></header><div class="panel-body"><form id="settings-form"><label>Choisir un mode</label><div class="mode-options"><label class="mode-option"><input type="radio" name="execution_mode" value="fixed" __FIXED_CHECKED__><span>Nombre fixe<small>Un nombre exact de répétitions.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="range" __RANGE_CHECKED__><span>Intervalle<small>Des exécutions distinctes réparties aléatoirement sur plusieurs jours.</small></span></label><label class="mode-option"><input type="radio" name="execution_mode" value="continuous" __CONTINUOUS_CHECKED__><span>Continu<small>Cycles de cinq minutes successifs.</small></span></label></div><div id="mode-parameters" class="mode-parameters" hidden><div id="fixed-settings" class="mode-settings" hidden><label for="repetition-count">Nombre de répétitions</label><input id="repetition-count" type="number" min="1" max="10000" value="__REPETITION_COUNT__"></div><div id="range-settings" class="mode-settings" hidden><div class="repeat-fields"><div><label for="interval-execution-count">Nombre d’exécutions souhaité</label><input id="interval-execution-count" type="number" min="1" max="10000" value="__INTERVAL_EXECUTION_COUNT__"></div><div><label for="interval-duration-days">Durée en jours</label><input id="interval-duration-days" type="number" min="1" max="365" value="__INTERVAL_DURATION_DAYS__"></div><div><label for="interval-repetition-count">Répétitions par exécution</label><input id="interval-repetition-count" type="number" min="1" max="10000" value="__INTERVAL_REPETITION_COUNT__"></div></div><p class="hint">Le total réel est tiré entre le nombre choisi moins 10 et plus 10. Chaque exécution possède son propre rapport, applique le nombre de répétitions indiqué à toutes les URL sélectionnées et démarre à une heure aléatoire pendant la durée indiquée.</p></div><div id="continuous-settings" class="mode-settings" hidden><div class="repeat-fields"><div><label for="repetition-min">Minimum par cycle</label><input id="repetition-min" type="number" min="1" max="10000" value="__REPETITION_MIN__"></div><div><label for="repetition-max">Maximum par cycle</label><input id="repetition-max" type="number" min="1" max="10000" value="__REPETITION_MAX__"></div></div></div><div id="recurring-settings" class="recurring-settings" hidden><label for="interval-minutes">Intervalle planifié en minutes</label><input id="interval-minutes" type="number" min="60" max="10080" value="__INTERVAL__"><div class="check-row"><input id="schedule-enabled" type="checkbox" __SCHEDULE_CHECKED__><label for="schedule-enabled">Activer la planification récurrente</label></div></div><div class="form-actions"><button data-config type="submit">Enregistrer les réglages</button></div></div></form></div></section>
 </section>
 </div></main>
 
@@ -2103,14 +2487,16 @@ async function api(url,{method='GET',body=null}={}){const options={method,header
 function goToPage(name,updateHash=true){if(!pages.includes(name))return;activePage=name;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.nav===name));document.querySelectorAll('.app-page').forEach(node=>{const hidden=node.dataset.page!==name;node.classList.toggle('active',!hidden);node.setAttribute('aria-hidden',String(hidden));node.inert=hidden});document.getElementById('page-title').textContent=pageLabels[name];if(updateHash)history.replaceState(null,'',`#${name}`)}
 document.querySelectorAll('[data-nav]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.nav)));document.querySelectorAll('[data-go]').forEach(node=>node.addEventListener('click',()=>goToPage(node.dataset.go)));
 function cell(text,className=''){const node=document.createElement('td');node.textContent=text??'';if(className)node.className=className;return node}function actionButton(label,className,handler){const node=document.createElement('button');node.type='button';node.className=(className||'secondary')+' small';node.textContent=label;node.addEventListener('click',handler);return node}
-function resetTargetForm(){document.getElementById('target-form').reset();document.getElementById('target-id').value='';document.getElementById('target-selected').checked=true;document.getElementById('target-form-title').textContent='Nouvelle cible';document.getElementById('target-submit').textContent='Ajouter';document.getElementById('target-cancel').hidden=true}
-function editTarget(target){document.getElementById('target-id').value=target.id;document.getElementById('target-alias').value=target.alias;document.getElementById('target-url').value=target.url;document.getElementById('target-button').value=target.button_text;document.getElementById('target-second-button').value=target.second_button_text||'';document.getElementById('target-selected').checked=target.selected;document.getElementById('target-form-title').textContent='Modifier la cible';document.getElementById('target-submit').textContent='Enregistrer';document.getElementById('target-cancel').hidden=false;goToPage('targets');document.getElementById('target-alias').focus()}
+function resetTargetForm(hideEditor=true){document.getElementById('target-form').reset();document.getElementById('target-id').value='';document.getElementById('target-selected').checked=true;document.getElementById('target-form-title').textContent='Nouvelle cible';document.getElementById('target-submit').textContent='Ajouter';document.getElementById('target-cancel').hidden=true;document.getElementById('target-editor').hidden=hideEditor}
+function openTargetEditor(){resetTargetForm(false);document.getElementById('target-alias').focus()}
+function editTarget(target){document.getElementById('target-editor').hidden=false;document.getElementById('target-id').value=target.id;document.getElementById('target-alias').value=target.alias;document.getElementById('target-url').value=target.url;document.getElementById('target-button').value=target.button_text;document.getElementById('target-second-button').value=target.second_button_text||'';document.getElementById('target-selected').checked=target.selected;document.getElementById('target-form-title').textContent='Modifier la cible';document.getElementById('target-submit').textContent='Enregistrer';document.getElementById('target-cancel').hidden=false;goToPage('targets');document.getElementById('target-alias').focus()}
 function renderTargets(){const body=document.getElementById('target-rows');body.replaceChildren();const selected=targets.filter(item=>item.selected).length;document.getElementById('target-count').textContent=`${targets.length} cible(s)`;document.getElementById('selected-target-count').textContent=`${selected} sélectionnée(s)`;document.getElementById('selected-count-stat').textContent=`${selected} / ${targets.length}`;document.getElementById('run-selected-count').textContent=String(selected);if(!targets.length){const row=document.createElement('tr');const empty=cell('Aucune cible.','empty');empty.colSpan=6;row.append(empty);body.append(row);renderRun();return}for(const target of targets){const row=document.createElement('tr');if(target.selected)row.className='target-selected';const selectCell=document.createElement('td');const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=Boolean(target.selected);checkbox.disabled=Boolean(runState.running);checkbox.addEventListener('change',async()=>{try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'PATCH',body:{selected:checkbox.checked}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){checkbox.checked=!checkbox.checked;showNotice(error.message,true)}});selectCell.append(checkbox);row.append(selectCell,cell(target.alias),cell(target.url,'url-cell'),cell(target.button_text||'—'),cell(target.second_button_text||'—'));const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Modifier','secondary',()=>editTarget(target)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la cible « ${target.alias} » ?`))return;try{const value=await api(`/api/targets/${encodeURIComponent(target.id)}`,{method:'DELETE'});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(actions);body.append(row)}renderRun()}
-function resetGatewayForm(){document.getElementById('gateway-form').reset();document.getElementById('gateway-id').value='';document.getElementById('gateway-secret').required=true;document.getElementById('gateway-active').disabled=false;document.getElementById('gateway-form-title').textContent='Nouvelle passerelle';document.getElementById('gateway-submit').textContent='Ajouter';document.getElementById('gateway-cancel').hidden=true}
-function editGateway(gateway){document.getElementById('gateway-id').value=gateway.id;document.getElementById('gateway-alias').value=gateway.alias;document.getElementById('gateway-secret').value='';document.getElementById('gateway-secret').required=false;document.getElementById('gateway-active').checked=gateway.active;document.getElementById('gateway-active').disabled=gateway.active;document.getElementById('gateway-form-title').textContent='Modifier la passerelle';document.getElementById('gateway-submit').textContent='Enregistrer';document.getElementById('gateway-cancel').hidden=false;goToPage('gateways');document.getElementById('gateway-alias').focus()}
+function resetGatewayForm(hideEditor=true){document.getElementById('gateway-form').reset();document.getElementById('gateway-id').value='';document.getElementById('gateway-secret').required=true;document.getElementById('gateway-active').disabled=false;document.getElementById('gateway-form-title').textContent='Nouvelle passerelle';document.getElementById('gateway-submit').textContent='Ajouter';document.getElementById('gateway-cancel').hidden=true;document.getElementById('gateway-editor').hidden=hideEditor}
+function openGatewayEditor(){resetGatewayForm(false);document.getElementById('gateway-alias').focus()}
+function editGateway(gateway){document.getElementById('gateway-editor').hidden=false;document.getElementById('gateway-id').value=gateway.id;document.getElementById('gateway-alias').value=gateway.alias;document.getElementById('gateway-secret').value='';document.getElementById('gateway-secret').required=false;document.getElementById('gateway-active').checked=gateway.active;document.getElementById('gateway-active').disabled=gateway.active;document.getElementById('gateway-form-title').textContent='Modifier la passerelle';document.getElementById('gateway-submit').textContent='Enregistrer';document.getElementById('gateway-cancel').hidden=false;goToPage('gateways');document.getElementById('gateway-alias').focus()}
 function renderGateways(){const body=document.getElementById('gateway-rows');body.replaceChildren();document.getElementById('gateway-count').textContent=`${gateways.length} passerelle(s)`;if(!gateways.length){const row=document.createElement('tr');const empty=cell('Aucune passerelle.','empty');empty.colSpan=4;row.append(empty);body.append(row);renderConnection();return}for(const gateway of gateways){const row=document.createElement('tr');if(gateway.active)row.className='gateway-active';const activeCell=document.createElement('td');const active=document.createElement('span');active.className='badge '+(gateway.active?'active-badge':'');active.textContent=gateway.active?'ACTIVE':'—';activeCell.append(active);const statusCell=document.createElement('td');const status=document.createElement('span');status.className='badge '+(gateway.configured?'success':'missing-badge');status.textContent=gateway.configured?'DISPONIBLES':'MANQUANTS';statusCell.append(status);const actions=document.createElement('td');actions.className='row-actions';if(!gateway.active)actions.append(actionButton('Activer','secondary',async()=>{try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}/select`,{method:'POST',body:{}});gateways=value.gateways;renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));actions.append(actionButton('Modifier','secondary',()=>editGateway(gateway)),actionButton('Supprimer','danger',async()=>{if(!confirm(`Supprimer la passerelle « ${gateway.alias} » ?`))return;try{const value=await api(`/api/gateways/${encodeURIComponent(gateway.id)}`,{method:'DELETE'});gateways=value.gateways;resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}}));row.append(activeCell,cell(gateway.alias),statusCell,actions);body.append(row)}renderConnection();renderRun()}
 function renderConnection(){const active=gateways.find(item=>item.active);const ready=Boolean(active&&active.configured);document.getElementById('gateway-status').textContent=active?(ready?active.alias:`${active.alias} · identifiants manquants`):'Absente';document.getElementById('gateway-dot').className='status-dot '+(ready?'ready':'warning');document.getElementById('run-gateway-name').textContent=active?active.alias:'Aucune';let label='Cache local',css='warning';if(databaseState.connected){label='Supabase connectée';css='ready'}else if(databaseState.configured){label='Connexion requise'}document.getElementById('database-status').textContent=label;document.getElementById('database-dot').className='status-dot '+css}
-function renderRun(){const running=Boolean(runState.running);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}document.getElementById('run-status').lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+(running?'running':'idle');const selected=targets.filter(item=>item.selected).length;const active=gateways.find(item=>item.active&&item.configured);document.getElementById('run-button').disabled=running||selected===0||!active;document.getElementById('stop-button').disabled=!running||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=running});document.querySelectorAll('#target-rows input,#target-rows button,#gateway-rows button').forEach(node=>{node.disabled=running});updateResultSelection()}
+function renderRun(){const running=Boolean(runState.running);const campaignActive=Boolean(runState.interval_campaign_active);const stopping=Boolean(runState.stop_requested);let text='En attente';if(running){const planned=runState.planned_repetitions===null?'continu':`${runState.planned_repetitions} répétition(s)`;text=`${stopping?'Arrêt demandé':'Exécution en cours'} · ${runState.completed_visits||0} visite(s) · ${planned}`}else if(campaignActive){const launched=runState.interval_campaign_launched||0;const total=runState.interval_campaign_total||0;const next=runState.next_run_at?` · prochaine ${runState.next_run_at}`:'';text=`Campagne Intervalle · ${launched}/${total} lancée(s)${next}`}document.getElementById('run-status').lastChild.textContent=text;document.getElementById('run-dot').className='status-dot '+((running||campaignActive)?'running':'idle');const selected=targets.filter(item=>item.selected).length;const active=gateways.find(item=>item.active&&item.configured);const busy=running||campaignActive;document.getElementById('run-button').disabled=busy||selected===0||!active;document.getElementById('stop-button').disabled=!busy||stopping;document.querySelectorAll('[data-config]').forEach(node=>{node.disabled=busy});document.querySelectorAll('#target-rows input,#target-rows button,#gateway-rows button').forEach(node=>{node.disabled=busy});updateResultSelection()}
 function resultLabel(report,result){if(report.execution_mode==='continuous')return `cycle ${result.continuous_window||''} · ${result.window_repetition_count||''}`;return `${result.repetition||''} / ${report.repetition_count??''}`}
 function resultSelector(runId,visitNumber=null){const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='result-selector';checkbox.dataset.runId=runId;checkbox.dataset.kind=visitNumber===null?'run':'visit';if(visitNumber!==null)checkbox.dataset.visitNumber=String(visitNumber);checkbox.addEventListener('change',updateResultSelection);return checkbox}
 function renderReports(){const body=document.getElementById('result-rows');body.replaceChildren();let visitCount=0;let emptyRunCount=0;for(const report of [...reports].reverse()){const runId=String(report.run_id||'');const results=Array.isArray(report.results)?report.results:[];if(!results.length){emptyRunCount++;const row=document.createElement('tr');const selectCell=document.createElement('td');selectCell.append(resultSelector(runId));const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(report.in_progress?'active-badge':report.success?'success':report.error?'failure':'missing-badge');badge.textContent=report.in_progress?'EN COURS':report.success?'TERMINÉE':report.error?'ÉCHEC':'SANS VISITE';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(report.started_at||''),cell('—'),cell(String(report.source||'')+(report.in_progress?' · EN COURS':'')),cell(report.execution_mode||'—'),cell('—'),cell('—'),outcome,cell(report.error||'','url-cell'),actions);body.append(row);continue}for(const result of [...results].reverse()){visitCount++;const row=document.createElement('tr');const selectCell=document.createElement('td');selectCell.append(resultSelector(runId,Number(result.visit_number)));const source=String(report.source||'')+(report.in_progress?' · EN COURS':'');const outcome=document.createElement('td');const badge=document.createElement('span');badge.className='badge '+(result.success?'success':'failure');badge.textContent=result.success?'SUCCÈS':'ÉCHEC';outcome.append(badge);const actions=document.createElement('td');actions.className='row-actions';actions.append(actionButton('Visite','danger',()=>deleteVisits([{run_id:runId,visit_number:Number(result.visit_number)}])),actionButton('Exécution','danger',()=>deleteRuns([runId])));row.append(selectCell,cell(result.started_at||''),cell(result.target_alias||result.target_id||'—'),cell(source),cell(resultLabel(report,result)),cell(result.initial_url||'','url-cell'),cell(result.final_url||'','url-cell'),outcome,cell(result.error||'','url-cell'),actions);body.append(row)}}if(!visitCount&&!emptyRunCount){const row=document.createElement('tr');const empty=cell('Aucun résultat.','empty');empty.colSpan=10;row.append(empty);body.append(row)}const counts=[`${visitCount} visite(s)`];if(emptyRunCount)counts.push(`${emptyRunCount} exécution(s) sans visite`);document.getElementById('result-count').textContent=counts.join(' · ');document.getElementById('select-all-results').checked=false;updateResultSelection()}
@@ -2120,13 +2506,15 @@ async function deleteResultData(body,confirmation){if(!confirm(confirmation))ret
 async function deleteVisits(visits){if(!visits.length)return;await deleteResultData({action:'selected',visits,run_ids:[]},`Supprimer ${visits.length} visite(s) de Supabase ?`)}
 async function deleteRuns(runIds){if(!runIds.length)return;await deleteResultData({action:'selected',visits:[],run_ids:runIds},'Supprimer toute cette exécution et ses visites de Supabase ?')}
 async function refreshState(){try{const value=await api('/api/state');runState=value.run;databaseState=value.database;reports=value.reports;gateways=value.gateways;if(!document.getElementById('target-id').value)targets=value.targets;renderTargets();renderGateways();renderReports();renderConnection();renderRun()}catch(error){showNotice(error.message,true)}}
-document.getElementById('target-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('target-id').value;const payload={alias:document.getElementById('target-alias').value,url:document.getElementById('target-url').value,button_text:document.getElementById('target-button').value,second_button_text:document.getElementById('target-second-button').value,selected:document.getElementById('target-selected').checked};try{const value=await api(id?`/api/targets/${encodeURIComponent(id)}`:'/api/targets',{method:id?'PATCH':'POST',body:payload});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('target-cancel').addEventListener('click',resetTargetForm);for(const [id,mode] of [['targets-all','all'],['targets-none','none']])document.getElementById(id).addEventListener('click',async()=>{try{const value=await api('/api/targets/selection',{method:'POST',body:{mode}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
-document.getElementById('gateway-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('gateway-id').value;const wantsActive=document.getElementById('gateway-active').checked;const payload={alias:document.getElementById('gateway-alias').value,gateway:document.getElementById('gateway-secret').value,active:wantsActive};try{let value=await api(id?`/api/gateways/${encodeURIComponent(id)}`:'/api/gateways',{method:id?'PATCH':'POST',body:payload});gateways=value.gateways;if(id&&wantsActive&&!gateways.find(item=>item.id===id)?.active){value=await api(`/api/gateways/${encodeURIComponent(id)}/select`,{method:'POST',body:{}});gateways=value.gateways}resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('gateway-cancel').addEventListener('click',resetGatewayForm);
-document.getElementById('settings-form').addEventListener('submit',async event=>{event.preventDefault();const payload={execution_mode:document.querySelector('input[name="execution_mode"]:checked').value,repetition_count:Number(document.getElementById('repetition-count').value),repetition_min:Number(document.getElementById('repetition-min').value),repetition_max:Number(document.getElementById('repetition-max').value),interval_minutes:Number(document.getElementById('interval-minutes').value),schedule_enabled:document.getElementById('schedule-enabled').checked};try{const value=await api('/api/settings',{method:'POST',body:payload});showNotice(value.message)}catch(error){showNotice(error.message,true)}});
+document.getElementById('show-target-editor').addEventListener('click',openTargetEditor);document.getElementById('target-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('target-id').value;const payload={alias:document.getElementById('target-alias').value,url:document.getElementById('target-url').value,button_text:document.getElementById('target-button').value,second_button_text:document.getElementById('target-second-button').value,selected:document.getElementById('target-selected').checked};try{const value=await api(id?`/api/targets/${encodeURIComponent(id)}`:'/api/targets',{method:id?'PATCH':'POST',body:payload});targets=value.targets;resetTargetForm();renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('target-cancel').addEventListener('click',()=>resetTargetForm());for(const [id,mode] of [['targets-all','all'],['targets-none','none']])document.getElementById(id).addEventListener('click',async()=>{try{const value=await api('/api/targets/selection',{method:'POST',body:{mode}});targets=value.targets;renderTargets();showNotice(value.message)}catch(error){showNotice(error.message,true)}});
+document.getElementById('show-gateway-editor').addEventListener('click',openGatewayEditor);document.getElementById('gateway-form').addEventListener('submit',async event=>{event.preventDefault();const id=document.getElementById('gateway-id').value;const wantsActive=document.getElementById('gateway-active').checked;const payload={alias:document.getElementById('gateway-alias').value,gateway:document.getElementById('gateway-secret').value,active:wantsActive};try{let value=await api(id?`/api/gateways/${encodeURIComponent(id)}`:'/api/gateways',{method:id?'PATCH':'POST',body:payload});gateways=value.gateways;if(id&&wantsActive&&!gateways.find(item=>item.id===id)?.active){value=await api(`/api/gateways/${encodeURIComponent(id)}/select`,{method:'POST',body:{}});gateways=value.gateways}resetGatewayForm();renderGateways();showNotice(value.message)}catch(error){showNotice(error.message,true)}});document.getElementById('gateway-cancel').addEventListener('click',()=>resetGatewayForm());
+function revealModeSettings(mode){document.getElementById('mode-parameters').hidden=false;document.getElementById('fixed-settings').hidden=mode!=='fixed';document.getElementById('range-settings').hidden=mode!=='range';document.getElementById('continuous-settings').hidden=mode!=='continuous';document.getElementById('recurring-settings').hidden=mode==='range'}
+document.querySelectorAll('input[name="execution_mode"]').forEach(node=>node.addEventListener('click',()=>revealModeSettings(node.value)));
+document.getElementById('settings-form').addEventListener('submit',async event=>{event.preventDefault();const selectedMode=document.querySelector('input[name="execution_mode"]:checked');if(!selectedMode){showNotice('Choisissez un mode d’exécution.',true);return}const payload={execution_mode:selectedMode.value,repetition_count:Number(document.getElementById('repetition-count').value),repetition_min:Number(document.getElementById('repetition-min').value),repetition_max:Number(document.getElementById('repetition-max').value),interval_execution_count:Number(document.getElementById('interval-execution-count').value),interval_duration_days:Number(document.getElementById('interval-duration-days').value),interval_repetition_count:Number(document.getElementById('interval-repetition-count').value),interval_minutes:Number(document.getElementById('interval-minutes').value),schedule_enabled:document.getElementById('schedule-enabled').checked};try{const value=await api('/api/settings',{method:'POST',body:payload});showNotice(value.message)}catch(error){showNotice(error.message,true)}});
 document.getElementById('run-button').addEventListener('click',async()=>{try{const value=await api('/api/run',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});document.getElementById('stop-button').addEventListener('click',async()=>{try{const value=await api('/api/stop',{method:'POST',body:{}});showNotice(value.message);await refreshState()}catch(error){showNotice(error.message,true)}});
 document.getElementById('select-all-results').addEventListener('change',event=>{document.querySelectorAll('.result-selector').forEach(node=>{node.checked=event.target.checked});updateResultSelection()});document.getElementById('delete-selected-results').addEventListener('click',()=>{const selected=[...document.querySelectorAll('.result-selector:checked')];const visits=selected.filter(node=>node.dataset.kind==='visit').map(node=>({run_id:node.dataset.runId,visit_number:Number(node.dataset.visitNumber)}));const runIds=selected.filter(node=>node.dataset.kind==='run').map(node=>node.dataset.runId);deleteResultData({action:'selected',visits,run_ids:runIds},`Supprimer ${selected.length} élément(s) de Supabase ?`)});document.getElementById('clear-results').addEventListener('click',()=>deleteResultData({action:'all'},'Effacer définitivement tout l’historique Supabase ?'));
 let pollInProgress=false;async function pollStatus(){if(pollInProgress||resultMutationPending)return;pollInProgress=true;try{const value=await api('/api/status');const wasRunning=Boolean(runState.running);runState=value.run;renderRun();if(runState.running||wasRunning)await refreshState()}catch(error){showNotice(error.message,true)}finally{pollInProgress=false}}
-renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetGatewayForm();goToPage('home');window.setInterval(pollStatus,3000);
+renderTargets();renderGateways();renderReports();renderConnection();renderRun();resetTargetForm();resetGatewayForm();goToPage('home');window.setInterval(pollStatus,3000);
 </script>
 </body>
 </html>"""
@@ -2147,6 +2535,15 @@ renderTargets();renderGateways();renderReports();renderConnection();renderRun();
         "__REPETITION_COUNT__": str(app_settings.get("repetition_count", 1)),
         "__REPETITION_MIN__": str(app_settings.get("repetition_min", 1)),
         "__REPETITION_MAX__": str(app_settings.get("repetition_max", 10)),
+        "__INTERVAL_EXECUTION_COUNT__": str(
+            app_settings.get("interval_execution_count", 20)
+        ),
+        "__INTERVAL_DURATION_DAYS__": str(
+            app_settings.get("interval_duration_days", 1)
+        ),
+        "__INTERVAL_REPETITION_COUNT__": str(
+            app_settings.get("interval_repetition_count", 1)
+        ),
         "__INTERVAL__": str(app_settings.get("interval_minutes", 60)),
         "__SCHEDULE_CHECKED__": (
             "checked" if app_settings.get("schedule_enabled") else ""

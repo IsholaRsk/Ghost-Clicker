@@ -1,6 +1,6 @@
 # Ghost-Clicker — Web Service Docker
 
-Ghost-Clicker est un outil de **test fonctionnel autorisé**. Chaque lancement utilise l’un des trois modes configurables : un nombre fixe de répétitions, un total tiré dans un intervalle défini, ou une exécution continue jusqu’à l’arrêt manuel. Pour chaque visite, il :
+Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il propose trois modes configurables : un nombre fixe de répétitions, une campagne d’exécutions réparties aléatoirement sur plusieurs jours, ou une exécution continue jusqu’à l’arrêt manuel. Pour chaque visite, il :
 
 1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
 2. ouvre immédiatement la page cible dans Chromium headless ;
@@ -56,7 +56,7 @@ Le projet Supabase dédié contient les données persistantes suivantes :
 - la configuration, les cibles et les pseudos de passerelles dans `ghost_clicker_settings` ;
 - les identifiants de passerelles chiffrés dans Supabase Vault, associés par `ghost_clicker_gateway_secrets` ;
 - le résumé de chaque exécution dans `ghost_clicker_reports` ;
-- chaque visite, sans troncature de l’historique, dans `ghost_clicker_visits` ;
+- les 500 visites les plus récentes dans `ghost_clicker_visits`, les plus anciennes étant supprimées automatiquement ;
 - un journal d’actions non sensible dans `ghost_clicker_events`.
 
 Le schéma versionné se trouve dans `supabase/migrations/`. Le Blueprint renseigne déjà `SUPABASE_URL`. Dans **Render → Environment**, ajoutez la valeur de `SUPABASE_SECRET_KEY` avec la clé serveur dédiée au bot. Cette clé ne doit jamais être placée dans Git, dans le navigateur ou dans un message.
@@ -98,7 +98,7 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface se présente comme une application sombre, plate et lisible, structurée par des séparateurs plutôt que par des cartes décoratives, en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet.
+Après connexion, l’interface se présente comme une application sombre, plate et lisible, structurée par des séparateurs plutôt que par des cartes décoratives, en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet. Les paramètres d’un mode restent masqués jusqu’au clic sur ce mode. Les formulaires de nouvelle cible et de nouvelle passerelle restent eux aussi masqués jusqu’au clic sur le bouton correspondant ; la modification d’une entrée ouvre directement son formulaire.
 
 1. ouvrez **Passerelles**, ajoutez une ou plusieurs entrées avec leur pseudo et activez-en exactement une ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
@@ -114,20 +114,22 @@ Les formulaires, la sélection, le lancement, l’arrêt, le statut et les résu
 
 ## Lancer le bot
 
-Deux modes sont disponibles :
+Deux déclenchements sont disponibles :
 
-- **Lancer maintenant** : exécution manuelle ;
-- **Planification** : intervalle configurable entre 60 et 10080 minutes.
+- **Lancer maintenant** : démarre le mode choisi ;
+- **Planification récurrente** : pour les modes fixe et continu, relance selon un intervalle configurable entre 60 et 10080 minutes.
 
-Le mode de répétition est choisi dans l’interface :
+Le mode d’exécution est choisi dans l’interface :
 
-- **Nombre fixe** : exécute exactement le nombre indiqué ;
-- **Intervalle** : tire un nombre entre le minimum et le maximum indiqués ;
+- **Nombre fixe** : exécute exactement le nombre de répétitions indiqué ;
+- **Intervalle** : l’administrateur choisit un nombre d’exécutions souhaité `N` et une durée en jours. Au démarrage, le bot tire une seule fois un total compris entre `N − 10` et `N + 10`, dans les limites autorisées, puis crée des horaires aléatoires répartis sur toute la durée. Chaque horaire lance une exécution indépendante, avec son propre rapport et le nombre de répétitions configuré pour chaque cible sélectionnée ;
 - **Continu** : fonctionne par cycles successifs de 5 minutes. Au début de chaque cycle, un nouveau nombre de répétitions est tiré entre le minimum et le maximum configurés. Le bot continue jusqu’au clic sur **Arrêter** et termine proprement la visite en cours.
 
-Chaque cible cochée est visitée une fois par répétition ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions et 3 cibles sélectionnées produisent 600 visites. En mode continu, les 1 000 résultats les plus récents restent en mémoire afin de borner l’utilisation du processus, mais chaque visite terminée est enregistrée séparément dans Supabase et reste disponible dans l’export complet.
+Le plan de la campagne Intervalle est enregistré dans les réglages persistants : il reprend donc après un redémarrage ou un redéploiement. Si plusieurs horaires sont dépassés pendant une indisponibilité, ils sont repris successivement, jamais en parallèle. **Arrêter** annule les horaires restants et demande l’arrêt propre de l’éventuelle visite en cours.
 
-Une seule exécution peut fonctionner à la fois. Les cibles, paramètres, passerelles complètes, sélection active, exécutions, visites et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
+Chaque cible cochée est visitée une fois par répétition, y compris lors de chaque exécution Intervalle ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions fixes et 3 cibles sélectionnées produisent 600 visites. Une seule exécution Chromium peut fonctionner à la fois.
+
+Les cibles, paramètres, passerelles complètes, sélection active, campagnes, exécutions et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
 
 ## Résultats
 
@@ -143,7 +145,7 @@ L’interface affiche :
 - réussite ou échec ;
 - message d’erreur.
 
-Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne durable dans Supabase. L’interface charge un historique récent pour rester réactive ; le CSV demande l’ensemble des rapports et visites disponibles.
+Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne dans Supabase. La rétention est limitée automatiquement aux **500 visites les plus récentes** : à partir de la 501e, les lignes les plus anciennes sont supprimées de Supabase, du tableau et du CSV. Le cache local applique la même limite.
 
 Depuis la console, l’administrateur peut supprimer une visite, plusieurs éléments cochés, une exécution complète — y compris une exécution sans visite — ou tout l’historique. Ces suppressions sont effectuées directement dans Supabase et restent disponibles pendant que le bot fonctionne ; la suppression d’une exécution efface aussi ses visites associées. Une exécution toujours active peut naturellement enregistrer de nouvelles visites après la suppression.
 
@@ -180,14 +182,14 @@ TARGET_URL="https://site-autorise.example/page"
 BUTTON_TEXT="Continuer"
 # Laissez uniquement cette valeur vide pour un clic unique.
 SECOND_BUTTON_TEXT="Confirmer"
-EXECUTION_MODE="fixed" # fixed, range ou continuous
+EXECUTION_MODE="fixed" # fixed ou continuous en lancement direct
 REPETITION_COUNT=10
 REPETITION_MIN=5
 REPETITION_MAX=20
 HEADLESS=false
 ```
 
-`proxy-gateway.txt` est ignoré par Git et doit rester local. Puis :
+La campagne **Intervalle** sur plusieurs jours dépend du planificateur persistant du service web et se configure donc dans l’interface, pas dans ce lancement direct de `main.py`. `proxy-gateway.txt` est ignoré par Git et doit rester local. Puis :
 
 ```powershell
 python .\main.py
@@ -207,7 +209,8 @@ python .\main.py
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
 - aucune requête de contrôle IP avant l’ouverture de la cible ;
-- nombre fixe, intervalle personnalisé ou exécution continue avec arrêt manuel ;
+- nombre fixe, campagne Intervalle à horaires aléatoires sur plusieurs jours, ou exécution continue avec arrêt manuel ;
+- suppression automatique des visites les plus anciennes au-delà de 500 lignes ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 
 ## Tests

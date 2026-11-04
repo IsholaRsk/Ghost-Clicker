@@ -277,8 +277,8 @@ class SupabaseStorage:
         all_visits: bool,
     ) -> list[dict[str, Any]]:
         page_size = 1_000
-        # La console ne charge que les 500 visites les plus récentes pour que
-        # le rafraîchissement JSON reste léger. L'export CSV utilise all_visits.
+        # La console limite toujours sa réponse à 500 visites. L'export demande
+        # toute la rétention durable, elle-même plafonnée à 500 par Supabase.
         maximum = None if all_visits else 500
         visits: list[dict[str, Any]] = []
         for chunk_start in range(0, len(run_ids), 50):
