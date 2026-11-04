@@ -546,7 +546,11 @@ def visit_target(
     opened_pages: list[Any] = []
 
     try:
-        browser = playwright.chromium.launch(headless=settings.headless)
+        # L'API Playwright conserve le nom « chromium », mais le canal
+        # sélectionne ici le binaire Google Chrome stable installé dans l'image.
+        browser = playwright.chromium.launch(
+            channel="chrome", headless=settings.headless
+        )
         context, page = open_proxy_context(browser, settings, result)
         install_request_guard(page)
 

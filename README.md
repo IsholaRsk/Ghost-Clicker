@@ -3,13 +3,13 @@
 Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il propose trois modes configurables : un nombre fixe de répétitions, une campagne d’exécutions réparties aléatoirement sur plusieurs jours, ou une exécution continue jusqu’à l’arrêt manuel. Pour chaque visite, il :
 
 1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
-2. ouvre immédiatement la page cible dans Chromium headless ;
+2. ouvre immédiatement la page cible dans Google Chrome piloté par Playwright ;
 3. si aucun premier libellé n’est configuré, termine la visite sans rechercher de bouton, sans cliquer et sans attendre de redirection ;
 4. sinon, repère le premier libellé visible exact, mémorise sa position et clique une première fois ;
 5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
 6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
 7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
-8. ferme complètement Chromium avant la visite suivante.
+8. ferme complètement Google Chrome avant la visite suivante.
 
 Il effectue exactement zéro, un ou deux clics selon la cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
@@ -24,7 +24,7 @@ Ghost-Clicker/
 ├── database.py       # client de persistance Supabase
 ├── supabase/
 │   └── migrations/   # schéma SQL versionné
-├── Dockerfile        # Chromium/Playwright dans Docker
+├── Dockerfile        # Google Chrome/Playwright dans Docker
 ├── render.yaml       # Blueprint Render
 ├── .env.example      # modèle sans secret
 ├── .dockerignore
@@ -127,7 +127,7 @@ Le mode d’exécution est choisi dans l’interface :
 
 Le plan de la campagne Intervalle est enregistré dans les réglages persistants : il reprend donc après un redémarrage ou un redéploiement. Si plusieurs horaires sont dépassés pendant une indisponibilité, ils sont repris successivement, jamais en parallèle. **Arrêter** annule les horaires restants et demande l’arrêt propre de l’éventuelle visite en cours.
 
-Chaque cible cochée est visitée une fois par répétition, y compris lors de chaque exécution Intervalle ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions fixes et 3 cibles sélectionnées produisent 600 visites. Une seule exécution Chromium peut fonctionner à la fois.
+Chaque cible cochée est visitée une fois par répétition, y compris lors de chaque exécution Intervalle ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions fixes et 3 cibles sélectionnées produisent 600 visites. Une seule exécution Google Chrome peut fonctionner à la fois.
 
 Les cibles, paramètres, passerelles complètes, sélection active, campagnes, exécutions et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
 
@@ -151,7 +151,7 @@ Depuis la console, l’administrateur peut supprimer une visite, plusieurs élé
 
 ## Navigateur sur Render
 
-Render n’a pas d’écran graphique. Chromium utilise donc obligatoirement :
+Render n’a pas d’écran graphique. Google Chrome utilise donc obligatoirement le mode headless :
 
 ```dotenv
 HEADLESS=true
@@ -168,7 +168,7 @@ py -3 -m venv .venv
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m playwright install chromium
+python -m playwright install chrome
 Copy-Item .env.example .env
 notepad .env
 ```

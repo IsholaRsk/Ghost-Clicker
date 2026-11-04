@@ -117,6 +117,16 @@ class StandaloneModeTests(unittest.TestCase):
         self.assertEqual(target.second_button_text, "")
 
 
+class BrowserRuntimeTests(unittest.TestCase):
+    def test_docker_image_installs_google_chrome_channel(self):
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("python -m playwright install chrome", dockerfile)
+        self.assertNotIn("playwright install chromium", dockerfile)
+
+
 class ProxyGatewayFileTests(unittest.TestCase):
     def gateway_line(self, suffix="gateway", port=8000):
         return (
@@ -424,8 +434,10 @@ class BrowserLifecycleTests(unittest.TestCase):
         class FakeChromium:
             def __init__(self):
                 self.browsers = []
+                self.launch_options = []
 
-            def launch(self, **_kwargs):
+            def launch(self, **kwargs):
+                self.launch_options.append(kwargs)
                 browser = FakeBrowser()
                 self.browsers.append(browser)
                 return browser
@@ -476,6 +488,10 @@ class BrowserLifecycleTests(unittest.TestCase):
             [1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
         )
         self.assertEqual(len(chromium.browsers), 10)
+        self.assertEqual(
+            chromium.launch_options,
+            [{"channel": "chrome", "headless": True}] * 10,
+        )
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
         expected_targets = targets * 2
         for browser, target, result in zip(
