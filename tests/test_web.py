@@ -128,6 +128,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertNotIn("hashchange", content)
         self.assertIn("Base de données", content)
         self.assertIn("Cache local", content)
+        self.assertIn("Google Chrome neuf par visite", content)
         self.assertIn('value="continuous"', content)
         self.assertIn("Cycles de cinq minutes", content)
         self.assertIn("Arrêter", content)
