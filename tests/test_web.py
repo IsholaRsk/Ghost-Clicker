@@ -4,6 +4,7 @@ import io
 import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -58,6 +59,9 @@ class WebUploadTests(unittest.TestCase):
                 completed_visits=0,
                 continuous_window=0,
                 window_repetition_count=0,
+                interval_campaign_active=False,
+                interval_campaign_total=0,
+                interval_campaign_launched=0,
             )
         with web.DATABASE_LOCK:
             web.DATABASE_STATE.update(
@@ -104,6 +108,16 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("height:48px", content)
         self.assertIn("Premier libellé facultatif", content)
         self.assertIn('id="target-button" placeholder="Continuer">', content)
+        self.assertIn('id="target-editor" class="panel" hidden', content)
+        self.assertIn('id="gateway-editor" class="panel" hidden', content)
+        self.assertIn('id="mode-parameters" class="mode-parameters" hidden', content)
+        self.assertIn("Nombre d’exécutions souhaité", content)
+        self.assertIn("Durée en jours", content)
+        self.assertIn("Répétitions par exécution", content)
+        self.assertIn("moins 10 et plus 10", content)
+        self.assertIn("revealModeSettings", content)
+        self.assertIn("show-target-editor", content)
+        self.assertIn("show-gateway-editor", content)
         self.assertIn(".panel{margin-bottom:30px;border-top:1px solid", content)
         self.assertIn(".stat:last-child{border-right:0}", content)
         self.assertIn(".badge{display:inline-block;font-size:12px", content)
@@ -557,7 +571,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(blocked.status_code, 400)
         self.assertIn("arrêt", blocked.get_json()["error"])
 
-    def test_settings_support_a_custom_range_and_continuous_mode(self):
+    def test_settings_support_an_interval_campaign_and_continuous_mode(self):
         target = "https://edited.example/page | Continuer"
         response = self.client.post(
             "/settings",
@@ -569,6 +583,9 @@ class WebUploadTests(unittest.TestCase):
                 "repetition_count": "7",
                 "repetition_min": "3",
                 "repetition_max": "9",
+                "interval_execution_count": "80",
+                "interval_duration_days": "7",
+                "interval_repetition_count": "4",
             },
             headers=self.headers,
             follow_redirects=False,
@@ -580,6 +597,10 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(settings["repetition_count"], 7)
         self.assertEqual(settings["repetition_min"], 3)
         self.assertEqual(settings["repetition_max"], 9)
+        self.assertEqual(settings["interval_execution_count"], 80)
+        self.assertEqual(settings["interval_duration_days"], 7)
+        self.assertEqual(settings["interval_repetition_count"], 4)
+        self.assertFalse(settings["schedule_enabled"])
 
         response = self.client.post(
             "/settings",
@@ -600,6 +621,127 @@ class WebUploadTests(unittest.TestCase):
             web.load_app_settings()["execution_mode"], "continuous"
         )
 
+    def test_run_api_starts_an_interval_campaign_instead_of_one_long_job(self):
+        settings = {**web.DEFAULT_APP_SETTINGS, "execution_mode": "range"}
+        campaign = {"total_executions": 23}
+        with (
+            mock.patch("web.load_app_settings", return_value=settings),
+            mock.patch("web.sync_active_gateway", return_value=True),
+            mock.patch("web.load_browser_settings", return_value=object()),
+            mock.patch(
+                "web.targets_from_settings",
+                return_value=[main.Target("https://example.com")],
+            ),
+            mock.patch(
+                "web.start_interval_campaign", return_value=campaign
+            ) as start_campaign,
+            mock.patch("web.start_job") as start_job,
+        ):
+            response = self.client.post(
+                "/api/run", json={}, headers=self.api_headers
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("23 exécution", response.get_json()["message"])
+        start_campaign.assert_called_once_with()
+        start_job.assert_not_called()
+
+    def test_interval_campaign_uses_plus_or_minus_ten_random_times(self):
+        offsets = list(reversed(range(30)))
+        with (
+            mock.patch("web.random.randint", return_value=30) as choose_total,
+            mock.patch("web.random.uniform", side_effect=offsets),
+        ):
+            campaign = web.build_interval_campaign(
+                20, 3, now_timestamp=1_000
+            )
+
+        choose_total.assert_called_once_with(10, 30)
+        self.assertEqual(campaign["total_executions"], 30)
+        self.assertEqual(campaign["launched_executions"], 0)
+        self.assertEqual(
+            campaign["scheduled_timestamps"],
+            [1_000 + offset for offset in sorted(offsets)],
+        )
+        self.assertTrue(campaign["active"])
+
+    def test_interval_campaign_launches_independent_single_pass_reports(self):
+        campaign = {
+            "id": "campaign_test_123",
+            "active": True,
+            "started_at": "2026-11-04T00:00:00+00:00",
+            "ends_at": "2026-11-05T00:00:00+00:00",
+            "total_executions": 2,
+            "launched_executions": 0,
+            "scheduled_timestamps": [900.0, 1_100.0],
+        }
+        settings = {
+            **web.DEFAULT_APP_SETTINGS,
+            "execution_mode": "range",
+            "interval_repetition_count": 4,
+            "interval_campaign": campaign,
+        }
+        with (
+            mock.patch("web.load_app_settings", return_value=settings),
+            mock.patch("web.save_app_settings") as save_settings,
+            mock.patch("web.start_job", return_value=True) as start_job,
+            mock.patch("web.record_database_event"),
+        ):
+            started = web.process_interval_campaign(now_timestamp=1_000)
+
+        self.assertTrue(started)
+        start_job.assert_called_once_with(
+            "intervalle 1/2",
+            execution_mode_override="range",
+            repetition_count_override=4,
+        )
+        saved_campaign = save_settings.call_args.args[0]["interval_campaign"]
+        self.assertEqual(saved_campaign["launched_executions"], 1)
+        self.assertEqual(saved_campaign["scheduled_timestamps"], [1_100.0])
+        self.assertTrue(saved_campaign["active"])
+
+    def test_stopping_between_interval_executions_cancels_the_campaign(self):
+        settings = {
+            **web.DEFAULT_APP_SETTINGS,
+            "interval_campaign": {
+                "id": "campaign_stop_123",
+                "active": True,
+                "started_at": "now",
+                "ends_at": "later",
+                "total_executions": 12,
+                "launched_executions": 2,
+                "scheduled_timestamps": [time.time() + 3_600],
+            },
+        }
+        web.save_app_settings(settings)
+
+        self.assertTrue(web.request_job_stop())
+
+        campaign = web.load_app_settings()["interval_campaign"]
+        self.assertFalse(campaign["active"])
+        self.assertEqual(campaign["scheduled_timestamps"], [])
+        self.assertFalse(web.RUN_STATE["interval_campaign_active"])
+
+    def test_local_report_retention_keeps_only_the_latest_500_visits(self):
+        reports = [
+            {
+                "run_id": "run_old_123",
+                "completed_visits": 300,
+                "results": [{"value": value} for value in range(300)],
+            },
+            {
+                "run_id": "run_new_123",
+                "completed_visits": 300,
+                "results": [{"value": value} for value in range(300, 600)],
+            },
+        ]
+
+        retained = web.retain_latest_visits(reports)
+
+        self.assertEqual(sum(len(item["results"]) for item in retained), 500)
+        self.assertEqual(retained[0]["results"][0]["value"], 100)
+        self.assertEqual(retained[-1]["results"][-1]["value"], 599)
+
     def test_supabase_is_the_primary_settings_store_with_a_local_cache(self):
         persistent_settings = {
             "targets": [
@@ -619,6 +761,10 @@ class WebUploadTests(unittest.TestCase):
             "repetition_count": 4,
             "repetition_min": 2,
             "repetition_max": 6,
+            "interval_execution_count": 20,
+            "interval_duration_days": 1,
+            "interval_repetition_count": 1,
+            "interval_campaign": {},
         }
         storage = mock.Mock()
         storage.load_settings.return_value = persistent_settings
@@ -936,6 +1082,34 @@ class WebUploadTests(unittest.TestCase):
         )
         self.assertNotIn("ip_sortie", content)
         self.assertNotIn("pays", content)
+
+    def test_csv_automatically_keeps_only_the_latest_500_rows(self):
+        web.append_report(
+            {
+                "run_id": "run_csv_retention_123",
+                "source": "manuel",
+                "execution_mode": "fixed",
+                "repetition_count": 600,
+                "completed_visits": 600,
+                "results": [
+                    {
+                        "started_at": f"visit-{index}",
+                        "repetition": index,
+                        "initial_url": f"https://example.com/{index}",
+                        "final_url": f"https://example.com/{index}",
+                        "success": True,
+                    }
+                    for index in range(1, 601)
+                ],
+            }
+        )
+
+        response = self.client.get("/results.csv", headers=self.headers)
+        rows = list(csv.DictReader(io.StringIO(response.get_data(as_text=True))))
+
+        self.assertEqual(len(rows), 500)
+        self.assertEqual(rows[0]["url_initiale"], "https://example.com/101")
+        self.assertEqual(rows[-1]["url_initiale"], "https://example.com/600")
 
     def test_upload_routes_require_authentication_and_csrf(self):
         unauthorized = self.client.post("/gateway")

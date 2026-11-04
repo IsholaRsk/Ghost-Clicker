@@ -2,6 +2,7 @@ import io
 import json
 import os
 import unittest
+from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 
@@ -210,6 +211,18 @@ class SupabaseStorageTests(unittest.TestCase):
         self.assertEqual(
             request.call_args.kwargs["body"]["p_run_ids"], ["run_456"]
         )
+
+    def test_retention_migration_prunes_visits_beyond_500(self):
+        migration = (
+            Path(__file__).resolve().parents[1]
+            / "supabase"
+            / "migrations"
+            / "20261104143810_retain_latest_500_visits.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("offset 500", migration.lower())
+        self.assertIn("delete from public.ghost_clicker_visits", migration.lower())
+        self.assertIn("from public, anon, authenticated", migration.lower())
 
 
 if __name__ == "__main__":
