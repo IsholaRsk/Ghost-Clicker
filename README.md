@@ -4,14 +4,14 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Chaque lancement u
 
 1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
 2. ouvre immédiatement la page cible dans Chromium headless ;
-3. repère le premier libellé visible exact et mémorise sa position dans le bouton ;
-4. clique une première fois ;
+3. si aucun premier libellé n’est configuré, termine la visite sans rechercher de bouton, sans cliquer et sans attendre de redirection ;
+4. sinon, repère le premier libellé visible exact, mémorise sa position et clique une première fois ;
 5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
 6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
 7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
 8. ferme complètement Chromium avant la visite suivante.
 
-Il effectue exactement un ou deux clics selon la ligne cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
+Il effectue exactement zéro, un ou deux clics selon la cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/IsholaRsk/Ghost-Clicker)
 
@@ -77,11 +77,11 @@ Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** p
 
 - un pseudo lisible ;
 - l’URL publique ;
-- le premier libellé exact ;
+- un premier libellé exact facultatif ;
 - un éventuel second libellé ;
 - une case indiquant si la cible doit participer aux prochains lancements.
 
-Sans second libellé, le bot clique une fois puis attend immédiatement la navigation. Avec un second libellé, il clique deux fois au même emplacement, avec une pause de 500 ms. Dans les deux cas, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sélectionne le mode à deux clics et reste une référence : il n’est pas recherché dans la page.
+Sans aucun libellé, le bot charge l’URL puis termine la visite sans rechercher ni cliquer de bouton et sans attendre de navigation liée à un clic. Avec uniquement le premier libellé, il clique une fois puis attend immédiatement la navigation. Avec deux libellés, il clique deux fois au même emplacement, avec une pause de 500 ms. Dans les modes avec clic, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sélectionne le mode à deux clics et reste une référence : il n’est pas recherché dans la page. Un second libellé sans premier est refusé.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -98,7 +98,7 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface se présente comme une application sombre et lisible en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet.
+Après connexion, l’interface se présente comme une application sombre, plate et lisible, structurée par des séparateurs plutôt que par des cartes décoratives, en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet.
 
 1. ouvrez **Passerelles**, ajoutez une ou plusieurs entrées avec leur pseudo et activez-en exactement une ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
@@ -106,7 +106,9 @@ Après connexion, l’interface se présente comme une application sombre et lis
 4. cochez les URL à utiliser, ou employez **Tout sélectionner** et **Tout désélectionner** ;
 5. revenez à **Accueil** et lancez le scénario : les exécutions manuelles et planifiées utilisent uniquement les URL cochées et la passerelle active.
 
-Le premier libellé doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
+Laissez les deux libellés vides pour une visite sans clic. Si un premier libellé est saisi, il doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
+
+L’ancien import texte, toujours accepté par les routes de compatibilité, reconnaît les trois formats `URL`, `URL | premier libellé` et `URL | premier libellé | second libellé`. Il refuse un second libellé lorsque le premier est vide.
 
 Les formulaires, la sélection, le lancement, l’arrêt, le statut et les résultats utilisent l’API JSON intégrée : la page d’administration n’est pas entièrement rechargée après chaque action.
 
@@ -174,8 +176,9 @@ Pour utiliser `main.py` avec une seule URL, créez `proxy-gateway.txt` avec l’
 ```dotenv
 PROXY_GATEWAY_FILE="proxy-gateway.txt"
 TARGET_URL="https://site-autorise.example/page"
+# Laissez les deux valeurs vides pour une simple visite sans clic.
 BUTTON_TEXT="Continuer"
-# Laissez vide pour un clic unique avec redirection directe.
+# Laissez uniquement cette valeur vide pour un clic unique.
 SECOND_BUTTON_TEXT="Confirmer"
 EXECUTION_MODE="fixed" # fixed, range ou continuous
 REPETITION_COUNT=10
@@ -200,7 +203,7 @@ python .\main.py
 - passerelles persistées durablement, avec identifiants chiffrés dans Supabase Vault et cache d’exécution privé en mode `0600` dans `/tmp` ;
 - rejet des URL locales, privées et réservées ;
 - maximum de 50 URL ;
-- exactement un clic par visite sans second libellé, ou deux clics au même emplacement lorsqu’il est configuré ;
+- zéro clic lorsque les libellés sont vides, un clic avec le seul premier libellé, ou deux clics au même emplacement lorsque les deux sont configurés ;
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
 - aucune requête de contrôle IP avant l’ouverture de la cible ;

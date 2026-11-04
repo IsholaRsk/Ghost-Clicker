@@ -70,6 +70,19 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(main.ConfigurationError):
             main.validate_button_text("")
 
+    def test_validates_zero_one_and_two_click_configurations(self):
+        self.assertEqual(main.validate_button_configuration("", ""), ("", ""))
+        self.assertEqual(
+            main.validate_button_configuration(" Continuer ", ""),
+            ("Continuer", ""),
+        )
+        self.assertEqual(
+            main.validate_button_configuration(" Continuer ", " Confirmer "),
+            ("Continuer", "Confirmer"),
+        )
+        with self.assertRaisesRegex(main.ConfigurationError, "premier libellé"):
+            main.validate_button_configuration("", "Confirmer")
+
     def test_validates_proxy_without_embedded_credentials(self):
         self.assertEqual(
             main.validate_proxy_server("http://proxy.test:8000/"),
@@ -79,6 +92,29 @@ class ValidationTests(unittest.TestCase):
             main.validate_proxy_server(
                 "http://embedded-user:embedded-pass@proxy.test:8000"
             )
+
+
+class StandaloneModeTests(unittest.TestCase):
+    def test_local_mode_accepts_a_target_without_button_labels(self):
+        report = main.RunReport(started_at="test", success=True)
+        environment = {
+            "TARGET_URL": "https://visit-only.example/page",
+            "EXECUTION_MODE": "fixed",
+            "REPETITION_COUNT": "1",
+        }
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("main.load_browser_settings", return_value=make_settings()),
+            mock.patch("main.run_targets", return_value=report) as run_targets,
+            mock.patch("builtins.print"),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        target = run_targets.call_args.args[1][0]
+        self.assertEqual(target.url, "https://visit-only.example/page")
+        self.assertEqual(target.button_text, "")
+        self.assertEqual(target.second_button_text, "")
 
 
 class ProxyGatewayFileTests(unittest.TestCase):
@@ -418,6 +454,7 @@ class BrowserLifecycleTests(unittest.TestCase):
             main.Target("https://two.example/page", "Valider", "Terminer"),
             main.Target("https://direct.example/page", "Entrer"),
             main.Target("https://popup-source.example/page", "Ouvrir"),
+            main.Target("https://visit-only.example/page"),
         ]
 
         with mock.patch(
@@ -433,12 +470,12 @@ class BrowserLifecycleTests(unittest.TestCase):
         self.assertTrue(report.success)
         self.assertEqual(report.repetition_count, 2)
         self.assertEqual(report.completed_repetitions, 2)
-        self.assertEqual(report.completed_visits, 8)
+        self.assertEqual(report.completed_visits, 10)
         self.assertEqual(
             [result.repetition for result in report.results],
-            [1, 1, 1, 1, 2, 2, 2, 2],
+            [1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
         )
-        self.assertEqual(len(chromium.browsers), 8)
+        self.assertEqual(len(chromium.browsers), 10)
         self.assertTrue(all(browser.closed for browser in chromium.browsers))
         expected_targets = targets * 2
         for browser, target, result in zip(
@@ -449,14 +486,14 @@ class BrowserLifecycleTests(unittest.TestCase):
             page = browser.contexts[0].page
             self.assertEqual(page.goto_calls, [target.url])
             self.assertNotIn("https://ipinfo.io/json", page.goto_calls)
-            expected_clicks = [target.button_text]
+            expected_clicks = [target.button_text] if target.button_text else []
             if target.second_button_text:
                 expected_clicks.append(page.changed_labels[target.button_text])
             self.assertEqual(page.clicked_labels, expected_clicks)
-            self.assertEqual(
-                page.text_requests,
-                [(target.button_text, True)],
+            expected_text_requests = (
+                [(target.button_text, True)] if target.button_text else []
             )
+            self.assertEqual(page.text_requests, expected_text_requests)
             expected_coordinates = (
                 [(110, 220)] if target.second_button_text else []
             )
@@ -466,7 +503,11 @@ class BrowserLifecycleTests(unittest.TestCase):
             expected_final_url = (
                 "https://popup.example/destination"
                 if target.button_text == "Ouvrir"
-                else f"{target.url}/redirected"
+                else (
+                    f"{target.url}/redirected"
+                    if target.button_text
+                    else target.url
+                )
             )
             self.assertEqual(result.final_url, expected_final_url)
             self.assertEqual(result.target_id, target.target_id)

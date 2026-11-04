@@ -56,7 +56,7 @@ class BrowserSettings:
 @dataclass(frozen=True)
 class Target:
     url: str
-    button_text: str
+    button_text: str = ""
     second_button_text: str = ""
     target_id: str = ""
     alias: str = ""
@@ -354,6 +354,20 @@ def validate_optional_button_text(value: str) -> str:
     return validate_button_text(text) if text else ""
 
 
+def validate_button_configuration(
+    button_text: str, second_button_text: str
+) -> tuple[str, str]:
+    """Valide le mode sans clic, à un clic ou à deux clics."""
+
+    first = validate_optional_button_text(button_text)
+    second = validate_optional_button_text(second_button_text)
+    if second and not first:
+        raise ConfigurationError(
+            "Le second libellé nécessite un premier libellé."
+        )
+    return first, second
+
+
 def proxy_gateway_path(base_dir: Path) -> Path:
     path = Path(os.getenv("PROXY_GATEWAY_FILE", DEFAULT_PROXY_GATEWAY_FILE))
     return path if path.is_absolute() else base_dir / path
@@ -565,45 +579,54 @@ def visit_target(
         )
         result.initial_status = response.status if response else None
         require_successful_target_response(response)
-        first_click_target = page.get_by_text(target.button_text, exact=True).first
-        first_click_target.wait_for(
-            state="visible", timeout=settings.click_timeout_ms
-        )
-        box = first_click_target.bounding_box()
-        if box is None:
-            raise RuntimeError("Impossible de déterminer la position du bouton.")
-        click_x = box["x"] + (box["width"] / 2)
-        click_y = box["y"] + (box["height"] / 2)
-        previous_url = page.url
-        navigation_status["value"] = None
-        context.on("page", new_page_handler)
-        first_click_target.click(timeout=settings.click_timeout_ms)
-
-        if target.second_button_text:
-            page.wait_for_timeout(500)
-            popup_already_open = any(
-                page_url(candidate) not in {"", "about:blank"}
-                for candidate in opened_pages
+        if not target.button_text:
+            # Une cible sans libellé est une simple visite : aucun clic ni
+            # attente de redirection n'est effectué.
+            result.final_url = page_url(page)
+            result.final_status = result.initial_status
+            result.success = True
+        else:
+            first_click_target = page.get_by_text(
+                target.button_text, exact=True
+            ).first
+            first_click_target.wait_for(
+                state="visible", timeout=settings.click_timeout_ms
             )
-            if page_url(page) == previous_url and not popup_already_open:
-                page.mouse.click(click_x, click_y)
+            box = first_click_target.bounding_box()
+            if box is None:
+                raise RuntimeError("Impossible de déterminer la position du bouton.")
+            click_x = box["x"] + (box["width"] / 2)
+            click_y = box["y"] + (box["height"] / 2)
+            previous_url = page.url
+            navigation_status["value"] = None
+            context.on("page", new_page_handler)
+            first_click_target.click(timeout=settings.click_timeout_ms)
 
-        destination_page = wait_for_navigation_outcome(
-            page,
-            previous_url,
-            opened_pages,
-            settings.redirect_timeout_ms,
-        )
+            if target.second_button_text:
+                page.wait_for_timeout(500)
+                popup_already_open = any(
+                    page_url(candidate) not in {"", "about:blank"}
+                    for candidate in opened_pages
+                )
+                if page_url(page) == previous_url and not popup_already_open:
+                    page.mouse.click(click_x, click_y)
 
-        if settings.wait_after_redirect_seconds:
-            destination_page.wait_for_timeout(
-                int(settings.wait_after_redirect_seconds * 1_000)
+            destination_page = wait_for_navigation_outcome(
+                page,
+                previous_url,
+                opened_pages,
+                settings.redirect_timeout_ms,
             )
-        result.final_url = page_url(destination_page)
-        result.final_status = (
-            navigation_status["value"] if destination_page is page else None
-        )
-        result.success = True
+
+            if settings.wait_after_redirect_seconds:
+                destination_page.wait_for_timeout(
+                    int(settings.wait_after_redirect_seconds * 1_000)
+                )
+            result.final_url = page_url(destination_page)
+            result.final_status = (
+                navigation_status["value"] if destination_page is page else None
+            )
+            result.success = True
     except Exception as exc:
         result.final_url = page.url if page is not None else ""
         result.error = redact_error(exc, settings)
@@ -803,17 +826,19 @@ def run_targets(
 
 
 def main() -> int:
-    """Mode local facultatif avec une URL et deux libellés dans .env."""
+    """Mode local facultatif avec une URL et zéro, un ou deux libellés."""
 
     try:
         base_dir = Path(__file__).resolve().parent
         settings = load_browser_settings(base_dir)
+        button_text, second_button_text = validate_button_configuration(
+            os.getenv("BUTTON_TEXT", ""),
+            os.getenv("SECOND_BUTTON_TEXT", ""),
+        )
         target = Target(
             url=validate_public_url(required_env("TARGET_URL")),
-            button_text=validate_button_text(required_env("BUTTON_TEXT")),
-            second_button_text=validate_optional_button_text(
-                os.getenv("SECOND_BUTTON_TEXT", "")
-            ),
+            button_text=button_text,
+            second_button_text=second_button_text,
         )
         execution_mode = os.getenv("EXECUTION_MODE", "fixed").strip().lower()
         fixed_count = parse_positive_int(

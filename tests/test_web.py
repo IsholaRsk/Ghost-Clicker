@@ -1,4 +1,5 @@
 import base64
+import csv
 import io
 import os
 import stat
@@ -79,7 +80,7 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_large_text_and_button_only_application_navigation(self):
+    def test_home_uses_large_text_flat_design_and_button_only_navigation(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
 
@@ -101,6 +102,12 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("node.classList.toggle('active',!hidden)", content)
         self.assertIn("font:16px/1.6", content)
         self.assertIn("height:48px", content)
+        self.assertIn("Premier libellé facultatif", content)
+        self.assertIn('id="target-button" placeholder="Continuer">', content)
+        self.assertIn(".panel{margin-bottom:30px;border-top:1px solid", content)
+        self.assertIn(".stat:last-child{border-right:0}", content)
+        self.assertIn(".badge{display:inline-block;font-size:12px", content)
+        self.assertNotIn("border-radius:999px", content)
         self.assertNotIn("style.transform", content)
         self.assertNotIn("touchstart", content)
         self.assertNotIn("touchend", content)
@@ -377,11 +384,30 @@ class WebUploadTests(unittest.TestCase):
             "https://first.example/page | Continuer",
         )
 
-    def test_target_upload_still_requires_the_first_label(self):
+    def test_target_upload_accepts_a_url_without_button_labels(self):
         response = self.post_file(
             "/upload-targets",
             "target_file",
             "https://first.example/page\n",
+            "targets.txt",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        query = parse_qs(urlsplit(response.headers["Location"]).query)
+        self.assertEqual(query["targets"], ["1"])
+        target = web.load_app_settings()["targets"][0]
+        self.assertEqual(target["button_text"], "")
+        self.assertEqual(target["second_button_text"], "")
+        self.assertEqual(
+            web.targets_to_text(web.load_app_settings()),
+            "https://first.example/page",
+        )
+
+    def test_target_upload_rejects_a_second_label_without_the_first(self):
+        response = self.post_file(
+            "/upload-targets",
+            "target_file",
+            "https://first.example/page | | Confirmer\n",
             "targets.txt",
         )
 
@@ -470,6 +496,40 @@ class WebUploadTests(unittest.TestCase):
         )
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.get_json()["targets"], [])
+
+    def test_target_crud_accepts_no_labels_and_rejects_only_a_second_label(self):
+        created = self.client.post(
+            "/api/targets",
+            json={
+                "alias": "Visite simple",
+                "url": "https://visit.example/page",
+                "button_text": "",
+                "second_button_text": "",
+                "selected": True,
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        target = created.get_json()["targets"][0]
+        self.assertEqual(target["button_text"], "")
+        self.assertEqual(target["second_button_text"], "")
+        selected = web.targets_from_settings(web.load_app_settings())
+        self.assertEqual(selected[0].button_text, "")
+
+        rejected = self.client.post(
+            "/api/targets",
+            json={
+                "alias": "Configuration invalide",
+                "url": "https://invalid.example/page",
+                "button_text": "",
+                "second_button_text": "Confirmer",
+                "selected": True,
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("premier libellé", rejected.get_json()["error"])
+        self.assertEqual(len(web.load_app_settings()["targets"]), 1)
 
     def test_api_mutations_require_csrf_and_reject_changes_while_running(self):
         missing_csrf = self.client.post(
@@ -842,7 +902,18 @@ class WebUploadTests(unittest.TestCase):
                         "button_text": "Continuer",
                         "second_button_text": "Confirmer",
                         "success": True,
-                    }
+                    },
+                    {
+                        "started_at": "2026-10-30T00:01:00+00:00",
+                        "repetition": 8,
+                        "proxy_name": "passerelle-rotative",
+                        "proxy_attempts": 1,
+                        "initial_url": "https://visit-only.example/page",
+                        "button_text": "",
+                        "second_button_text": "",
+                        "final_url": "https://visit-only.example/page",
+                        "success": True,
+                    },
                 ],
             }
         )
@@ -856,6 +927,12 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("repetition,repetitions_planifiees", content)
         self.assertIn(
             ",range,7,200,,,passerelle-rotative,1,", content
+        )
+        rows = list(csv.DictReader(io.StringIO(content)))
+        self.assertEqual(rows[1]["premier_libelle"], "")
+        self.assertEqual(rows[1]["second_libelle"], "")
+        self.assertEqual(
+            rows[1]["url_finale"], "https://visit-only.example/page"
         )
         self.assertNotIn("ip_sortie", content)
         self.assertNotIn("pays", content)
