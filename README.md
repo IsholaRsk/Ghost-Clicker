@@ -4,7 +4,7 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il propose trois m
 
 1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
 2. ouvre immédiatement la page cible dans Google Chrome piloté par Playwright ;
-3. si aucun premier libellé n’est configuré, termine la visite sans rechercher de bouton, sans cliquer et sans attendre de redirection ;
+3. si aucun premier libellé n’est configuré, ne recherche et ne clique aucun bouton, mais attend une redirection automatique ou l’ouverture d’un nouvel onglet ;
 4. sinon, repère le premier libellé visible exact, mémorise sa position et clique une première fois ;
 5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
 6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
@@ -86,7 +86,7 @@ Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** p
 - un éventuel second libellé ;
 - une case indiquant si la cible doit participer aux prochains lancements.
 
-Sans aucun libellé, le bot charge l’URL puis termine la visite sans rechercher ni cliquer de bouton et sans attendre de navigation liée à un clic. Avec uniquement le premier libellé, il clique une fois puis attend immédiatement la navigation. Avec deux libellés, il clique deux fois au même emplacement, avec une pause de 500 ms. Dans les modes avec clic, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sélectionne le mode à deux clics et reste une référence : il n’est pas recherché dans la page. Un second libellé sans premier est refusé.
+Sans aucun libellé, le bot charge l’URL sans rechercher ni cliquer de bouton, puis attend une redirection automatique ou l’ouverture d’un nouvel onglet. Si aucune destination différente n’apparaît avant le délai configuré, la visite échoue. Avec uniquement le premier libellé, il clique une fois puis attend immédiatement la navigation. Avec deux libellés, il clique deux fois au même emplacement, avec une pause de 500 ms. Dans tous les modes, une modification de l’URL actuelle ou l’ouverture d’un nouvel onglet est acceptée. Le second libellé sélectionne le mode à deux clics et reste une référence : il n’est pas recherché dans la page. Un second libellé sans premier est refusé.
 
 `ADMIN_TOKEN` est généré automatiquement par Render. Les anciens identifiants publiés dans une conversation doivent être réinitialisés avant utilisation.
 
@@ -111,7 +111,7 @@ Après connexion, l’interface React se présente comme un tableau de bord somb
 4. cochez les URL à utiliser, ou employez **Tout sélectionner** et **Tout désélectionner** ;
 5. revenez à **Accueil** et lancez le scénario : les exécutions manuelles et planifiées utilisent uniquement les URL cochées et la passerelle active.
 
-Laissez les deux libellés vides pour une visite sans clic. Si un premier libellé est saisi, il doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
+Laissez les deux libellés vides pour une visite sans clic qui attend une redirection automatique. Si un premier libellé est saisi, il doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
 
 L’ancien import texte, toujours accepté par les routes de compatibilité, reconnaît les trois formats `URL`, `URL | premier libellé` et `URL | premier libellé | second libellé`. Il refuse un second libellé lorsque le premier est vide.
 

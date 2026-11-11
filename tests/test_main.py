@@ -407,6 +407,11 @@ class BrowserLifecycleTests(unittest.TestCase):
 
             def wait_for_timeout(self, milliseconds):
                 self.waits.append(milliseconds)
+                if (
+                    milliseconds == 250
+                    and self.url == "https://visit-only.example/page"
+                ):
+                    self.url += "/redirected"
 
         class FakeContext:
             def __init__(self):
@@ -533,17 +538,17 @@ class BrowserLifecycleTests(unittest.TestCase):
             expected_coordinates = (
                 [(110, 220)] if target.second_button_text else []
             )
-            expected_waits = [500] if target.second_button_text else []
+            expected_waits = (
+                [500]
+                if target.second_button_text
+                else ([250] if not target.button_text else [])
+            )
             self.assertEqual(page.coordinate_clicks, expected_coordinates)
             self.assertEqual(page.waits, expected_waits)
             expected_final_url = (
                 "https://popup.example/destination"
                 if target.button_text == "Ouvrir"
-                else (
-                    f"{target.url}/redirected"
-                    if target.button_text
-                    else target.url
-                )
+                else f"{target.url}/redirected"
             )
             self.assertEqual(result.final_url, expected_final_url)
             self.assertEqual(result.target_id, target.target_id)
@@ -724,6 +729,21 @@ class RedirectTests(unittest.TestCase):
         page = FakePage()
         main.wait_for_redirect(page, page.url, 2_000)
         self.assertEqual(page.url, "https://example.com/final")
+
+    def test_reports_a_missing_redirect_without_referring_to_a_click(self):
+        class StaticPage:
+            url = "https://example.com/start"
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        with self.assertRaisesRegex(
+            TimeoutError,
+            "Aucune redirection ni nouvel onglet n'a été détecté",
+        ):
+            main.wait_for_navigation_outcome(
+                StaticPage(), "https://example.com/start", [], 1
+            )
 
 
 if __name__ == "__main__":

@@ -478,7 +478,7 @@ def wait_for_navigation_outcome(
             break
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                "Le clic n'a déclenché ni redirection ni nouvel onglet."
+                "Aucune redirection ni nouvel onglet n'a été détecté."
             )
         try:
             page.wait_for_timeout(250)
@@ -564,6 +564,7 @@ def visit_target(
                 opened_pages.append(new_page)
 
         new_page_handler = record_new_page
+        context.on("page", new_page_handler)
 
         def record_navigation(
             response: Any,
@@ -589,10 +590,29 @@ def visit_target(
         result.initial_status = response.status if response else None
         require_successful_target_response(response)
         if not target.button_text:
-            # Une cible sans libellé est une simple visite : aucun clic ni
-            # attente de redirection n'est effectué.
-            result.final_url = page_url(page)
-            result.final_status = result.initial_status
+            # Sans libellé, aucun clic n'est effectué, mais une visite n'est
+            # réussie que si le chargement déclenche une redirection ou ouvre
+            # un nouvel onglet.
+            destination_page = page
+            if page_url(page) == target.url:
+                navigation_status["value"] = None
+                destination_page = wait_for_navigation_outcome(
+                    page,
+                    target.url,
+                    opened_pages,
+                    settings.redirect_timeout_ms,
+                )
+            if settings.wait_after_redirect_seconds:
+                destination_page.wait_for_timeout(
+                    int(settings.wait_after_redirect_seconds * 1_000)
+                )
+            result.final_url = page_url(destination_page)
+            result.final_status = (
+                result.initial_status
+                if destination_page is page
+                and navigation_status["value"] is None
+                else navigation_status["value"]
+            )
             result.success = True
         else:
             first_click_target = page.get_by_text(
@@ -608,7 +628,6 @@ def visit_target(
             click_y = box["y"] + (box["height"] / 2)
             previous_url = page.url
             navigation_status["value"] = None
-            context.on("page", new_page_handler)
             first_click_target.click(timeout=settings.click_timeout_ms)
 
             if target.second_button_text:
