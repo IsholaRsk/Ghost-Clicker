@@ -416,7 +416,7 @@ function Targets({ targets, pending, mutate }) {
             {targets.map((target) => (
               <article className="resource-row" key={target.id}>
                 <span className="resource-icon"><Globe2 size={20} /></span>
-                <div className="resource-copy"><strong>{target.alias}</strong><a href={target.url} target="_blank" rel="noreferrer">{target.url} <ExternalLink size={12} /></a><span>{target.button_text ? `Clic : ${target.button_text}${target.second_button_text ? ` → ${target.second_button_text}` : ""}` : "Navigation seule"}</span></div>
+                <div className="resource-copy"><strong>{target.alias}</strong><a href={target.url} target="_blank" rel="noreferrer">{target.url} <ExternalLink size={12} /></a><span>{target.button_text ? `Clic : ${target.button_text}${target.second_button_text ? ` → ${target.second_button_text}` : ""}` : "Redirection automatique, sans clic"}</span></div>
                 <label className="switch"><input type="checkbox" checked={target.selected !== false} onChange={() => mutate(`/api/targets/${target.id}`, { method: "PATCH", body: { selected: target.selected === false } })} /><span /></label>
                 <button className="icon-button small" onClick={() => openEdit(target)} aria-label={`Modifier ${target.alias}`}><Pencil size={16} /></button>
                 <button className="icon-button small danger" onClick={() => window.confirm(`Supprimer « ${target.alias} » ?`) && mutate(`/api/targets/${target.id}`, { method: "DELETE" })} aria-label={`Supprimer ${target.alias}`}><Trash2 size={16} /></button>

@@ -180,6 +180,54 @@ class WebUploadTests(unittest.TestCase):
             web.load_app_settings()["lifetime_successful_visits"], 2
         )
 
+    def test_legacy_successes_without_a_redirect_are_corrected_once(self):
+        web.save_app_settings(
+            {
+                **web.DEFAULT_APP_SETTINGS,
+                "lifetime_successful_visits": 3,
+                "lifetime_metrics_initialized": True,
+                "redirect_success_migrated": False,
+            }
+        )
+        reports = [
+            {
+                "run_id": "legacy_run_123",
+                "results": [
+                    {
+                        "initial_url": "https://example.com/start",
+                        "final_url": "https://example.com/start",
+                        "button_text": "",
+                        "success": True,
+                    }
+                    for _index in range(3)
+                ],
+            }
+        ]
+
+        migrated = web.initialize_lifetime_metrics(
+            web.load_app_settings(), reports
+        )
+        public_reports = web.reports_for_api(reports)
+
+        self.assertTrue(migrated["redirect_success_migrated"])
+        self.assertEqual(migrated["lifetime_successful_visits"], 0)
+        self.assertTrue(
+            all(
+                not result["success"]
+                for result in public_reports[0]["results"]
+            )
+        )
+        self.assertIn(
+            "Aucune redirection",
+            public_reports[0]["results"][0]["error"],
+        )
+        self.assertEqual(
+            web.initialize_lifetime_metrics(migrated, reports)[
+                "lifetime_successful_visits"
+            ],
+            0,
+        )
+
     def post_file(self, route, field_name, content, filename):
         return self.client.post(
             route,
@@ -803,6 +851,7 @@ class WebUploadTests(unittest.TestCase):
             "interval_campaign": {},
             "lifetime_successful_visits": 0,
             "lifetime_metrics_initialized": False,
+            "redirect_success_migrated": False,
         }
         storage = mock.Mock()
         storage.load_settings.return_value = persistent_settings

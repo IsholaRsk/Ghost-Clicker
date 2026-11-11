@@ -89,6 +89,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "interval_campaign": {},
     "lifetime_successful_visits": 0,
     "lifetime_metrics_initialized": False,
+    "redirect_success_migrated": False,
 }
 SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 MAX_TARGET_ALIAS_LENGTH = 100
@@ -614,6 +615,9 @@ def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
         "lifetime_metrics_initialized": bool(
             value.get("lifetime_metrics_initialized", False)
         ),
+        "redirect_success_migrated": bool(
+            value.get("redirect_success_migrated", False)
+        ),
     }
 
 
@@ -709,28 +713,69 @@ def save_app_settings(value: dict[str, Any]) -> None:
     atomic_write_json(settings_path(), normalized)
 
 
+def is_successful_visit_result(result: dict[str, Any]) -> bool:
+    """Écarte les anciens faux positifs sans redirection automatique."""
+
+    if not bool(result.get("success")):
+        return False
+    initial_url = str(result.get("initial_url", "")).strip()
+    final_url = str(result.get("final_url", "")).strip()
+    button_text = str(result.get("button_text", "")).strip()
+    if button_text or not initial_url:
+        return True
+    return bool(final_url and final_url != initial_url)
+
+
 def count_successful_visits(reports: list[dict[str, Any]]) -> int:
     return sum(
         1
         for report in reports
         for result in report.get("results", [])
-        if isinstance(result, dict) and bool(result.get("success"))
+        if isinstance(result, dict) and is_successful_visit_result(result)
+    )
+
+
+def count_legacy_redirect_false_positives(
+    reports: list[dict[str, Any]],
+) -> int:
+    return sum(
+        1
+        for report in reports
+        for result in report.get("results", [])
+        if isinstance(result, dict)
+        and bool(result.get("success"))
+        and not is_successful_visit_result(result)
     )
 
 
 def initialize_lifetime_metrics(
     settings: dict[str, Any], reports: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Reprend l'historique persistant lors de la première mise à niveau."""
+    """Reprend l'historique et corrige les succès sans redirection une fois."""
 
-    if settings.get("lifetime_metrics_initialized", False):
+    if settings.get("lifetime_metrics_initialized", False) and settings.get(
+        "redirect_success_migrated", False
+    ):
         return settings
     with METRICS_LOCK:
         current = load_app_settings()
-        if current.get("lifetime_metrics_initialized", False):
+        initialized = bool(current.get("lifetime_metrics_initialized", False))
+        migrated = bool(current.get("redirect_success_migrated", False))
+        if initialized and migrated:
             return current
-        current["lifetime_successful_visits"] = count_successful_visits(reports)
-        current["lifetime_metrics_initialized"] = True
+        if not initialized:
+            current["lifetime_successful_visits"] = count_successful_visits(
+                reports
+            )
+            current["lifetime_metrics_initialized"] = True
+        elif not migrated:
+            false_positives = count_legacy_redirect_false_positives(reports)
+            current["lifetime_successful_visits"] = max(
+                0,
+                int(current.get("lifetime_successful_visits", 0))
+                - false_positives,
+            )
+        current["redirect_success_migrated"] = True
         try:
             save_app_settings(current)
         except (ConfigurationError, OSError):
@@ -746,14 +791,23 @@ def increment_lifetime_successful_visits(delta: int) -> int:
         return 0
     with METRICS_LOCK:
         settings = load_app_settings()
+        reports = load_reports(all_data=True)
         initialized = bool(settings.get("lifetime_metrics_initialized", False))
         if not initialized:
             # Le rapport de la visite courante a déjà été persisté : le
             # comptage initial la contient et il ne faut pas ajouter delta.
             settings["lifetime_successful_visits"] = count_successful_visits(
-                load_reports(all_data=True)
+                reports
             )
             settings["lifetime_metrics_initialized"] = True
+        elif not settings.get("redirect_success_migrated", False):
+            false_positives = count_legacy_redirect_false_positives(reports)
+            settings["lifetime_successful_visits"] = max(
+                0,
+                int(settings.get("lifetime_successful_visits", 0))
+                - false_positives,
+            )
+        settings["redirect_success_migrated"] = True
         current = int(settings.get("lifetime_successful_visits", 0))
         increment = delta if initialized else 0
         updated = min(current + increment, 9_223_372_036_854_775_807)
@@ -1540,16 +1594,23 @@ def reports_for_api(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             result = dict(raw_result)
             result.setdefault("visit_number", first_number + offset)
+            if result.get("success") and not is_successful_visit_result(result):
+                result["success"] = False
+                if not result.get("error"):
+                    result["error"] = (
+                        "Aucune redirection ni nouvel onglet n'a été détecté."
+                    )
             report["results"].append(result)
         normalized.append(report)
     return normalized
 
 
 def api_snapshot(*, include_targets: bool = True) -> dict[str, Any]:
-    reports = reports_for_api(load_reports())
+    stored_reports = load_reports()
     settings = load_app_settings() if include_targets else None
     if settings is not None:
-        settings = initialize_lifetime_metrics(settings, reports)
+        settings = initialize_lifetime_metrics(settings, stored_reports)
+    reports = reports_for_api(stored_reports)
     gateway_ready = sync_active_gateway(settings) if settings is not None else False
     with STATE_LOCK:
         state = dict(RUN_STATE)
@@ -2454,7 +2515,7 @@ def download_results() -> Response:
     )
     # L'interface limite l'affichage récent ; l'export récupère tout
     # l'historique persistant disponible.
-    for report in load_reports(all_data=True):
+    for report in reports_for_api(load_reports(all_data=True)):
         for result in report.get("results", []):
             writer.writerow(
                 [
@@ -2493,8 +2554,9 @@ def download_results() -> Response:
 def home() -> str:
     app_settings = load_app_settings()
     _browser_settings, configuration_error = read_browser_configuration(app_settings)
-    reports = reports_for_api(load_reports())
-    app_settings = initialize_lifetime_metrics(app_settings, reports)
+    stored_reports = load_reports()
+    app_settings = initialize_lifetime_metrics(app_settings, stored_reports)
+    reports = reports_for_api(stored_reports)
     gateways = gateways_for_api(app_settings)
     with STATE_LOCK:
         state = dict(RUN_STATE)
