@@ -81,7 +81,7 @@ La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. U
 Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** permet d’ajouter chaque cible avec :
 
 - un pseudo lisible ;
-- l’URL publique ;
+- l’URL publique, avec ou sans préfixe `https://` ; une adresse comme `getallink.com/butter` est automatiquement enregistrée en HTTPS ;
 - un premier libellé exact facultatif ;
 - un éventuel second libellé ;
 - une case indiquant si la cible doit participer aux prochains lancements.

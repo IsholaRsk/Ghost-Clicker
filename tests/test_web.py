@@ -113,6 +113,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("Nombre d’exécutions souhaité", javascript)
         self.assertIn("Tout sélectionner", javascript)
         self.assertIn("Tout effacer", javascript)
+        self.assertIn("getallink.com/butter", javascript)
         self.assertIn("/api/state", javascript)
         self.assertIn("/api/targets", javascript)
         self.assertIn("/api/gateways", javascript)
@@ -486,7 +487,7 @@ class WebUploadTests(unittest.TestCase):
         response = self.post_file(
             "/upload-targets",
             "target_file",
-            "https://first.example/page\n",
+            "first.example/page\n",
             "targets.txt",
         )
 

@@ -429,7 +429,7 @@ function Targets({ targets, pending, mutate }) {
         <Modal title={editing === "new" ? "Nouvelle URL" : "Modifier l’URL"} close={close}>
           <form className="form-grid" onSubmit={submit}>
             <Field label="Alias" value={form.alias} onChange={(alias) => setForm({ ...form, alias })} placeholder="Page principale" required />
-            <Field label="URL HTTPS" value={form.url} onChange={(url) => setForm({ ...form, url })} placeholder="https://exemple.com" type="url" required />
+            <Field label="URL ou domaine" value={form.url} onChange={(url) => setForm({ ...form, url })} placeholder="getallink.com/butter" inputMode="url" autoCapitalize="none" required />
             <Field label="Premier bouton (optionnel)" value={form.button_text || ""} onChange={(button_text) => setForm({ ...form, button_text })} placeholder="Continuer" />
             <Field label="Second bouton (optionnel)" value={form.second_button_text || ""} onChange={(second_button_text) => setForm({ ...form, second_button_text })} placeholder="Confirmer" />
             <label className="check-row"><input type="checkbox" checked={form.selected !== false} onChange={(event) => setForm({ ...form, selected: event.target.checked })} /> Sélectionner pour les prochaines exécutions</label>
