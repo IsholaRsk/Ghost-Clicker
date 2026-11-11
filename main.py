@@ -208,6 +208,12 @@ def validate_public_url(value: str) -> str:
     url = clean_url_boundaries(value)
     if not url:
         raise ConfigurationError("URL vide.")
+    if url.startswith("//"):
+        url = f"https:{url}"
+    elif not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url):
+        # Une adresse saisie comme « exemple.com/page » utilise HTTPS par
+        # défaut. Les schémas explicites restent validés ci-dessous.
+        url = f"https://{url}"
     if any(
         character.isspace()
         or unicodedata.category(character) in {"Cc", "Cf", "Cs"}

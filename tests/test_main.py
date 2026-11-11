@@ -34,6 +34,17 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(main.validate_public_url(value), value)
 
+    def test_adds_https_to_a_domain_entered_without_a_scheme(self):
+        values = {
+            "getallink.com/butter": "https://getallink.com/butter",
+            "www.example.com/page": "https://www.example.com/page",
+            "//example.org/other": "https://example.org/other",
+        }
+
+        for value, expected in values.items():
+            with self.subTest(value=value):
+                self.assertEqual(main.validate_public_url(value), expected)
+
     def test_removes_invisible_unicode_noise_at_url_boundaries(self):
         dirty = " \u2060https://www.example.com/page \u2060 "
         self.assertEqual(
