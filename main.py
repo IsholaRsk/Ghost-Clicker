@@ -305,6 +305,11 @@ def parse_proxy_gateway_text(value: str) -> ProxyConfig:
         )
 
     line_number, line = lines[0]
+    if "mailto:" in line.lower() or re.search(r"\[[^]]+\]\([^)]+\)", line):
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : collez uniquement la valeur brute "
+            "Rayobyte, sans lien mailto ni mise en forme Markdown."
+        )
     try:
         authentication, address = line.rsplit("@", maxsplit=1)
         username, password = authentication.split(":", maxsplit=1)

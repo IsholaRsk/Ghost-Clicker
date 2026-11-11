@@ -160,6 +160,26 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.username, "sample-user-gateway")
         self.assertEqual(gateway.password, "sample-pass-gateway")
 
+    def test_parses_rayobyte_country_routing_in_the_password(self):
+        gateway = main.parse_proxy_gateway_text(
+            "sample-user:sample-pass-country-CA@us-east.gw.rayobyte.com:8000"
+        )
+
+        self.assertEqual(gateway.server, "http://us-east.gw.rayobyte.com:8000")
+        self.assertEqual(gateway.username, "sample-user")
+        self.assertEqual(gateway.password, "sample-pass-country-CA")
+
+    def test_rejects_mailto_or_markdown_wrappers_without_echoing_credentials(self):
+        wrapped = (
+            "sample-user:[SENSITIVE_PASSWORD-country-CA@proxy.example:8000]"
+            "(mailto:SENSITIVE_PASSWORD-country-CA@proxy.example:8000)"
+        )
+        with self.assertRaises(main.ConfigurationError) as raised:
+            main.parse_proxy_gateway_text(wrapped)
+
+        self.assertIn("sans lien mailto", str(raised.exception))
+        self.assertNotIn("SENSITIVE_PASSWORD", str(raised.exception))
+
     def test_uses_a_safe_gateway_alias_comment_as_result_metadata(self):
         gateway = main.parse_proxy_gateway_text(
             f"# alias: Rayobyte principale\n{self.gateway_line()}\n"
