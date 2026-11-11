@@ -118,6 +118,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("revealModeSettings", content)
         self.assertIn("show-target-editor", content)
         self.assertIn("show-gateway-editor", content)
+        self.assertIn("password-country-CA@us-east.gw.rayobyte.com:8000", content)
+        self.assertIn("sans crochets, lien mailto ni Markdown", content)
         self.assertIn(".panel{margin-bottom:30px;border-top:1px solid", content)
         self.assertIn(".stat:last-child{border-right:0}", content)
         self.assertIn(".badge{display:inline-block;font-size:12px", content)
