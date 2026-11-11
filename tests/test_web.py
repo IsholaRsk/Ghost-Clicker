@@ -84,68 +84,101 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_uses_large_text_flat_design_and_button_only_navigation(self):
+    def test_home_mounts_the_dark_react_dashboard_without_secrets(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
+        javascript = (web.BASE_DIR / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        stylesheet = (web.BASE_DIR / "static" / "app.css").read_text(
+            encoding="utf-8"
+        )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Vue d’ensemble", content)
-        self.assertIn("Bibliothèque d’URL", content)
-        self.assertIn("Passerelles Rayobyte", content)
-        self.assertIn("Résultats Supabase", content)
-        self.assertIn("color-scheme:dark", content)
-        self.assertIn("--canvas:#0d0f12", content)
-        self.assertIn('id="app-track" class="app-track"', content)
-        self.assertIn('class="app-page active" data-page="home"', content)
-        self.assertIn('class="app-page" data-page="targets"', content)
-        self.assertIn('class="app-page" data-page="gateways"', content)
-        self.assertIn('class="app-page" data-page="results"', content)
-        self.assertIn('class="app-page" data-page="settings"', content)
-        self.assertIn('class="bottom-nav"', content)
-        self.assertIn('data-nav="gateways"', content)
-        self.assertIn("node.classList.toggle('active',!hidden)", content)
-        self.assertIn("font:16px/1.6", content)
-        self.assertIn("height:48px", content)
-        self.assertIn("Premier libellé facultatif", content)
-        self.assertIn('id="target-button" placeholder="Continuer">', content)
-        self.assertIn('id="target-editor" class="panel" hidden', content)
-        self.assertIn('id="gateway-editor" class="panel" hidden', content)
-        self.assertIn('id="mode-parameters" class="mode-parameters" hidden', content)
-        self.assertIn("Nombre d’exécutions souhaité", content)
-        self.assertIn("Durée en jours", content)
-        self.assertIn("Répétitions par exécution", content)
-        self.assertIn("moins 10 et plus 10", content)
-        self.assertIn("revealModeSettings", content)
-        self.assertIn("show-target-editor", content)
-        self.assertIn("show-gateway-editor", content)
-        self.assertIn("password-country-CA@us-east.gw.rayobyte.com:8000", content)
-        self.assertIn("sans crochets, lien mailto ni Markdown", content)
-        self.assertIn(".panel{margin-bottom:30px;border-top:1px solid", content)
-        self.assertIn(".stat:last-child{border-right:0}", content)
-        self.assertIn(".badge{display:inline-block;font-size:12px", content)
-        self.assertNotIn("border-radius:999px", content)
-        self.assertNotIn("style.transform", content)
-        self.assertNotIn("touchstart", content)
-        self.assertNotIn("touchend", content)
-        self.assertNotIn("hashchange", content)
-        self.assertIn("Base de données", content)
-        self.assertIn("Cache local", content)
-        self.assertIn("Google Chrome neuf par visite", content)
-        self.assertIn('value="continuous"', content)
-        self.assertIn("Cycles de cinq minutes", content)
-        self.assertIn("Arrêter", content)
-        self.assertIn("/api/targets", content)
-        self.assertIn("/api/gateways", content)
-        self.assertIn("/api/results/delete", content)
-        self.assertIn("La suppression reste disponible pendant une exécution", content)
-        self.assertIn("exécution(s) sans visite", content)
-        self.assertIn("dataset.kind", content)
-        self.assertIn("fetch(url,options)", content)
+        self.assertIn('<div id="root"></div>', content)
+        self.assertIn('id="ghost-clicker-bootstrap"', content)
+        self.assertIn('src="/static/app.js?v=1"', content)
+        self.assertIn('href="/static/app.css?v=1"', content)
+        self.assertIn('name="theme-color" content="#09090b"', content)
+        self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
-        self.assertNotIn("Importer les cibles", content)
-        self.assertNotIn("129–283", content)
-        self.assertNotIn("--canvas:#f4f4f1", content)
-        self.assertNotIn("radial-gradient", content)
+        self.assertNotIn("sample-pass", content)
+
+        self.assertIn("children:`Ghost`", javascript)
+        self.assertIn("children:`CLICKER`", javascript)
+        self.assertIn("SOLDE DISPONIBLE", javascript)
+        self.assertIn("250 clics", javascript)
+        self.assertIn("Premiers 500 clics", javascript)
+        self.assertIn("Visite réussie", javascript)
+        self.assertIn("Nombre d’exécutions souhaité", javascript)
+        self.assertIn("Tout sélectionner", javascript)
+        self.assertIn("Tout effacer", javascript)
+        self.assertIn("/api/state", javascript)
+        self.assertIn("/api/targets", javascript)
+        self.assertIn("/api/gateways", javascript)
+        self.assertIn("/api/results/delete", javascript)
+        self.assertIn("/api/settings", javascript)
+        self.assertIn("/api/stop", javascript)
+        self.assertIn("/results.csv", javascript)
+        self.assertIn("utilisateur:mot-de-passe-country-CC", javascript)
+        self.assertIn("color-scheme:dark", stylesheet.replace(" ", ""))
+        self.assertIn(".mobile-nav", stylesheet)
+        self.assertIn("@media (width<=720px)", stylesheet)
+        self.assertNotIn("--canvas:#f4f4f1", stylesheet)
+
+    def test_earnings_use_only_complete_blocks_and_the_second_tier(self):
+        expected = {
+            0: 0,
+            249: 0,
+            250: 12,
+            499: 12,
+            500: 24,
+            749: 24,
+            750: 32,
+            1_000: 40,
+        }
+
+        self.assertEqual(
+            {clicks: web.calculate_earnings(clicks) for clicks in expected},
+            expected,
+        )
+        public = web.settings_for_api(
+            {**web.DEFAULT_APP_SETTINGS, "lifetime_successful_visits": 750}
+        )
+        self.assertEqual(public["earnings_balance"], 32)
+
+        web.save_app_settings(
+            {
+                **web.DEFAULT_APP_SETTINGS,
+                "lifetime_successful_visits": 750,
+                "lifetime_metrics_initialized": True,
+            }
+        )
+        state = self.client.get("/api/state", headers=self.headers).get_json()
+        self.assertEqual(state["settings"]["lifetime_successful_visits"], 750)
+        self.assertEqual(state["settings"]["earnings_balance"], 32)
+
+    def test_existing_persisted_reports_initialize_the_click_total(self):
+        reports = [
+            {
+                "run_id": "existing_run_123",
+                "results": [
+                    {"success": True},
+                    {"success": False},
+                    {"success": True},
+                ],
+            }
+        ]
+
+        initialized = web.initialize_lifetime_metrics(
+            web.load_app_settings(), reports
+        )
+
+        self.assertTrue(initialized["lifetime_metrics_initialized"])
+        self.assertEqual(initialized["lifetime_successful_visits"], 2)
+        self.assertEqual(
+            web.load_app_settings()["lifetime_successful_visits"], 2
+        )
 
     def post_file(self, route, field_name, content, filename):
         return self.client.post(
@@ -768,6 +801,8 @@ class WebUploadTests(unittest.TestCase):
             "interval_duration_days": 1,
             "interval_repetition_count": 1,
             "interval_campaign": {},
+            "lifetime_successful_visits": 0,
+            "lifetime_metrics_initialized": False,
         }
         storage = mock.Mock()
         storage.load_settings.return_value = persistent_settings
@@ -865,7 +900,7 @@ class WebUploadTests(unittest.TestCase):
                         button_text=targets[0].button_text,
                         second_button_text="",
                         repetition=repetition,
-                        success=True,
+                        success=repetition == 1,
                     )
                 )
                 report.completed_repetitions = repetition
@@ -895,6 +930,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertEqual(len(reports[0]["results"]), 2)
         self.assertFalse(reports[0]["in_progress"])
+        self.assertEqual(
+            web.load_app_settings()["lifetime_successful_visits"], 1
+        )
 
     def test_results_can_be_deleted_by_visit_run_or_all_from_the_api(self):
         web.append_report(

@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# JavaScript
+node_modules/
+
 # Python
 .venv/
 venv/

@@ -8,6 +8,7 @@ proxies.txt
 *[Rr]ayobyte*.txt
 *[Pp]roxy*[Gg]ateway*.json
 *.local.json
+node_modules
 .venv
 venv
 __pycache__

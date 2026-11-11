@@ -20,8 +20,11 @@ Il effectue exactement zéro, un ou deux clics selon la cible, ne remplit aucun 
 ```text
 Ghost-Clicker/
 ├── main.py           # moteur Playwright
-├── web.py            # interface web et planification
+├── web.py            # API Flask, interface web et planification
 ├── database.py       # client de persistance Supabase
+├── frontend/src/     # tableau de bord React sombre
+├── static/           # bundle React compilé servi par Flask
+├── package.json      # dépendances et scripts du tableau de bord
 ├── supabase/
 │   └── migrations/   # schéma SQL versionné
 ├── Dockerfile        # Google Chrome/Playwright dans Docker
@@ -100,9 +103,9 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface se présente comme une application sombre, plate et lisible, structurée par des séparateurs plutôt que par des cartes décoratives, en cinq pages : **Accueil**, **URL**, **Passerelles**, **Résultats** et **Réglages**. La barre de navigation à icônes reste fixée en bas. Le changement de page se fait obligatoirement avec ses boutons — aucun balayage horizontal n’est utilisé — et ne provoque pas de rechargement complet. Les paramètres d’un mode restent masqués jusqu’au clic sur ce mode. Les formulaires de nouvelle cible et de nouvelle passerelle restent eux aussi masqués jusqu’au clic sur le bouton correspondant ; la modification d’une entrée ouvre directement son formulaire.
+Après connexion, l’interface React se présente comme un tableau de bord sombre, sobre et responsive inspiré d’une application financière. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et fixée en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
 
-1. ouvrez **Passerelles**, ajoutez une ou plusieurs entrées avec leur pseudo et activez-en exactement une ;
+1. ouvrez **Réseau**, ajoutez une ou plusieurs passerelles avec leur pseudo et activez-en exactement une ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
 3. utilisez les pseudos pour retrouver, consulter, modifier ou supprimer chaque entrée ;
 4. cochez les URL à utiliser, ou employez **Tout sélectionner** et **Tout désélectionner** ;
@@ -147,7 +150,9 @@ L’interface affiche :
 - réussite ou échec ;
 - message d’erreur.
 
-Le rapport persistant est enregistré après chaque visite : le tableau et le CSV téléchargeable se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne dans Supabase. La rétention est limitée automatiquement aux **500 visites les plus récentes** : à partir de la 501e, les lignes les plus anciennes sont supprimées de Supabase, du tableau et du CSV. Le cache local applique la même limite.
+Le rapport persistant est enregistré après chaque visite : le tableau, le CSV téléchargeable et les indicateurs d’accueil se mettent donc à jour pendant que l’exécution est encore en cours. Une même exécution conserve un seul résumé progressif au lieu de créer des doublons, tandis que chaque visite dispose de sa propre ligne dans Supabase. La rétention est limitée automatiquement aux **500 visites les plus récentes** : à partir de la 501e, les lignes les plus anciennes sont supprimées de Supabase, du tableau et du CSV. Le cache local applique la même limite.
+
+Le solde d’accueil utilise le total persistant des visites réussies. Une visite réussie vaut exactement un clic pour le calcul, qu’aucun, un ou deux boutons aient été configurés sur la cible ; une visite échouée ne compte pas. Seuls les blocs complets sont rémunérés : les deux premiers blocs de 250 clics rapportent 12 $ chacun, puis chaque bloc complet supplémentaire de 250 clics rapporte 8 $. Ainsi, 249 clics rapportent 0 $, 250 clics 12 $, 500 clics 24 $ et 750 clics 32 $. La suppression de lignes de l’historique ne supprime pas des clics déjà comptabilisés dans ce total de rémunération.
 
 Depuis la console, l’administrateur peut supprimer une visite, plusieurs éléments cochés, une exécution complète — y compris une exécution sans visite — ou tout l’historique. Ces suppressions sont effectuées directement dans Supabase et restent disponibles pendant que le bot fonctionne ; la suppression d’une exécution efface aussi ses visites associées. Une exécution toujours active peut naturellement enregistrer de nouvelles visites après la suppression.
 
@@ -215,8 +220,20 @@ python .\main.py
 - suppression automatique des visites les plus anciennes au-delà de 500 lignes ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 
+## Développement du tableau de bord
+
+Les fichiers compilés de `static/` sont versionnés afin que le conteneur Flask puisse les servir sans installer Node.js en production. Après une modification de `frontend/src/` :
+
+```powershell
+npm ci
+npm run check
+npm run build
+```
+
 ## Tests
 
 ```powershell
 python -m unittest discover -s tests -v
+npm run check
+npm run build
 ```
