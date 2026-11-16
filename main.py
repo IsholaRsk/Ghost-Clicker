@@ -7,6 +7,7 @@ import json
 import os
 import random
 import re
+import shlex
 import time
 import unicodedata
 from collections.abc import Callable, Sequence
@@ -279,8 +280,73 @@ def validate_proxy_server(value: str) -> str:
     return server
 
 
+def unwrap_curl_proxy_markdown(value: str, line_number: int) -> str:
+    """Retire uniquement le lien mail généré autour du proxy d'une commande curl."""
+
+    wrapped = re.fullmatch(
+        r"(?P<username>[^:\s]+):\[(?P<label>[^\]\s]+)\]"
+        r"\(mailto:(?P<mail>[^)\s]+)\):(?P<port>\d+)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if wrapped is None:
+        return value
+    if wrapped.group("label") != wrapped.group("mail"):
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : le lien proxy copié est incohérent."
+        )
+    return (
+        f"{wrapped.group('username')}:{wrapped.group('label')}:"
+        f"{wrapped.group('port')}"
+    )
+
+
+def proxy_value_from_curl(line: str, line_number: int) -> str:
+    """Extrait sans l'exécuter l'argument -x/--proxy d'une commande curl."""
+
+    try:
+        arguments = shlex.split(line)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : commande curl mal formée."
+        ) from exc
+    executable = (
+        arguments[0].rsplit("/", maxsplit=1)[-1].lower()
+        if arguments
+        else ""
+    )
+    if executable not in {"curl", "curl.exe"}:
+        return line
+
+    proxy_values: list[str] = []
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in {"-x", "--proxy"}:
+            if index + 1 >= len(arguments):
+                raise ConfigurationError(
+                    f"Passerelle ligne {line_number} : valeur absente après "
+                    "l'option proxy curl."
+                )
+            proxy_values.append(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--proxy="):
+            proxy_values.append(argument.split("=", maxsplit=1)[1])
+        elif argument.startswith("-x") and len(argument) > 2:
+            proxy_values.append(argument[2:])
+        index += 1
+
+    if len(proxy_values) != 1 or not proxy_values[0]:
+        raise ConfigurationError(
+            f"Passerelle ligne {line_number} : la commande curl doit contenir "
+            "une seule option -x ou --proxy."
+        )
+    return unwrap_curl_proxy_markdown(proxy_values[0], line_number)
+
+
 def parse_proxy_gateway_text(value: str) -> ProxyConfig:
-    """Lit une passerelle rotative et son éventuel pseudo en commentaire."""
+    """Lit une passerelle rotative, brute ou fournie comme commande curl."""
 
     alias = "passerelle-rotative"
     for raw_line in value.splitlines():
@@ -311,6 +377,7 @@ def parse_proxy_gateway_text(value: str) -> ProxyConfig:
         )
 
     line_number, line = lines[0]
+    line = proxy_value_from_curl(line, line_number)
     if "mailto:" in line.lower() or re.search(r"\[[^]]+\]\([^)]+\)", line):
         raise ConfigurationError(
             f"Passerelle ligne {line_number} : collez uniquement la valeur brute "
