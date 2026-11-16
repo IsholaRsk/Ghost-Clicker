@@ -85,7 +85,7 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_mounts_the_dark_react_dashboard_without_secrets(self):
+    def test_home_mounts_the_light_react_dashboard_without_secrets(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
         javascript = (web.BASE_DIR / "static" / "app.js").read_text(
@@ -98,9 +98,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=5"', content)
-        self.assertIn('href="/static/app.css?v=5"', content)
-        self.assertIn('name="theme-color" content="#0c0d0f"', content)
+        self.assertIn('src="/static/app.js?v=6"', content)
+        self.assertIn('href="/static/app.css?v=6"', content)
+        self.assertIn('name="theme-color" content="#efebe5"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
         self.assertNotIn("sample-pass", content)
@@ -128,8 +128,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("sorties limitées à US, UK et CA", javascript)
         self.assertIn("-country-GB", javascript)
         self.assertIn("Pays requis", javascript)
-        self.assertIn("color-scheme:dark", stylesheet.replace(" ", ""))
-        self.assertIn("--accent:#8ea3bf", stylesheet)
+        self.assertIn("color-scheme:light", stylesheet.replace(" ", ""))
+        self.assertIn("--accent:#343d20", stylesheet)
         self.assertIn(".mobile-nav", stylesheet)
         self.assertIn(".country-pill", stylesheet)
         self.assertIn(".url-balance-grid", stylesheet)
