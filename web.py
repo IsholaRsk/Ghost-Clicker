@@ -2843,14 +2843,14 @@ def home() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#09090b">
+<meta name="theme-color" content="#0c0d0f">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=4">
+<link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=4" defer></script>
+<script src="/static/app.js?v=5" defer></script>
 </body>
 </html>"""
 
