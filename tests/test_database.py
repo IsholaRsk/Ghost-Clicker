@@ -89,7 +89,9 @@ class SupabaseStorageTests(unittest.TestCase):
             "https://project.supabase.co", "sb_secret_value_for_tests_123456789"
         )
         gateway_values = {
-            "gateway_primary": "sample-user:sample-pass@proxy.example:8000"
+            "gateway_primary": (
+                "sample-user:sample-pass-country-US@proxy.example:8000"
+            )
         }
         with mock.patch.object(
             SupabaseStorage,

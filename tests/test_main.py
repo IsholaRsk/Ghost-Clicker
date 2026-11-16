@@ -139,9 +139,9 @@ class BrowserRuntimeTests(unittest.TestCase):
 
 
 class ProxyGatewayFileTests(unittest.TestCase):
-    def gateway_line(self, suffix="gateway", port=8000):
+    def gateway_line(self, suffix="gateway", port=8000, country="US"):
         return (
-            f"sample-user-{suffix}:sample-pass-{suffix}"
+            f"sample-user-{suffix}:sample-pass-{suffix}-country-{country}"
             f"@proxy-{suffix}.example:{port}"
         )
 
@@ -169,16 +169,41 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.name, "passerelle-rotative")
         self.assertEqual(gateway.server, "http://proxy-gateway.example:8000")
         self.assertEqual(gateway.username, "sample-user-gateway")
-        self.assertEqual(gateway.password, "sample-pass-gateway")
+        self.assertEqual(gateway.password, "sample-pass-gateway-country-US")
+        self.assertEqual(gateway.country_code, "US")
 
-    def test_parses_rayobyte_country_routing_in_the_password(self):
-        gateway = main.parse_proxy_gateway_text(
-            "sample-user:sample-pass-country-CA@us-east.gw.rayobyte.com:8000"
-        )
+    def test_parses_each_allowed_rayobyte_country_suffix(self):
+        for country_code in ("US", "GB", "CA"):
+            with self.subTest(country_code=country_code):
+                gateway = main.parse_proxy_gateway_text(
+                    "sample-user:sample-pass-country-"
+                    f"{country_code}@us-east.gw.rayobyte.com:8000"
+                )
 
-        self.assertEqual(gateway.server, "http://us-east.gw.rayobyte.com:8000")
-        self.assertEqual(gateway.username, "sample-user")
-        self.assertEqual(gateway.password, "sample-pass-country-CA")
+                self.assertEqual(
+                    gateway.server, "http://us-east.gw.rayobyte.com:8000"
+                )
+                self.assertEqual(gateway.username, "sample-user")
+                self.assertEqual(
+                    gateway.password, f"sample-pass-country-{country_code}"
+                )
+                self.assertEqual(gateway.country_code, country_code)
+
+    def test_rejects_missing_or_unsupported_country_suffixes(self):
+        values = {
+            "sample-user:SENSITIVE_PASSWORD@proxy.example:8000": "doit forcer",
+            "sample-user:SENSITIVE_PASSWORD-country-FR@proxy.example:8000": "Seules",
+            "sample-user:SENSITIVE_PASSWORD-country-UK@proxy.example:8000": "Seules",
+            "sample-user:SENSITIVE_PASSWORD-country-us@proxy.example:8000": "Seules",
+        }
+
+        for value, expected_message in values.items():
+            with self.subTest(value=value), self.assertRaises(
+                main.ConfigurationError
+            ) as raised:
+                main.parse_proxy_gateway_text(value)
+            self.assertIn(expected_message, str(raised.exception))
+            self.assertNotIn("SENSITIVE_PASSWORD", str(raised.exception))
 
     def test_parses_a_rayobyte_curl_proxy_command(self):
         gateway = main.parse_proxy_gateway_text(
@@ -189,6 +214,7 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.server, "http://us-east.gw.rayobyte.com:8000")
         self.assertEqual(gateway.username, "sample-user")
         self.assertEqual(gateway.password, "sample-pass-country-US")
+        self.assertEqual(gateway.country_code, "US")
 
     def test_parses_a_curl_command_with_automatic_markdown_links(self):
         gateway = main.parse_proxy_gateway_text(
@@ -203,9 +229,9 @@ class ProxyGatewayFileTests(unittest.TestCase):
 
     def test_parses_curl_long_and_attached_proxy_options(self):
         for option in (
-            "--proxy sample-user:sample-pass@proxy.example:8000",
-            "--proxy=sample-user:sample-pass@proxy.example:8000",
-            "-xsample-user:sample-pass@proxy.example:8000",
+            "--proxy sample-user:sample-pass-country-US@proxy.example:8000",
+            "--proxy=sample-user:sample-pass-country-GB@proxy.example:8000",
+            "-xsample-user:sample-pass-country-CA@proxy.example:8000",
         ):
             with self.subTest(option=option):
                 gateway = main.parse_proxy_gateway_text(

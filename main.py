@@ -22,6 +22,7 @@ EXECUTION_MODES = frozenset({"fixed", "range", "continuous"})
 MAX_CONFIGURED_REPETITIONS = 10_000
 MAX_CONTINUOUS_RESULTS = 1_000
 CONTINUOUS_WINDOW_SECONDS = 5 * 60
+ALLOWED_PROXY_COUNTRY_CODES = frozenset({"US", "GB", "CA"})
 
 
 class ConfigurationError(ValueError):
@@ -34,6 +35,7 @@ class ProxyConfig:
     server: str
     username: str = ""
     password: str = ""
+    country_code: str = ""
 
     def playwright_proxy(self) -> dict[str, str]:
         proxy = {"server": self.server}
@@ -345,6 +347,21 @@ def proxy_value_from_curl(line: str, line_number: int) -> str:
     return unwrap_curl_proxy_markdown(proxy_values[0], line_number)
 
 
+def proxy_country_code(password: str) -> str:
+    match = re.search(r"-country-([A-Za-z]{2})$", password)
+    if match is None:
+        raise ConfigurationError(
+            "La passerelle doit forcer un pays avec le suffixe "
+            "-country-US, -country-GB ou -country-CA."
+        )
+    country_code = match.group(1)
+    if country_code not in ALLOWED_PROXY_COUNTRY_CODES:
+        raise ConfigurationError(
+            "Seules les sorties proxy US, UK (country-GB) et CA sont autorisées."
+        )
+    return country_code
+
+
 def parse_proxy_gateway_text(value: str) -> ProxyConfig:
     """Lit une passerelle rotative, brute ou fournie comme commande curl."""
 
@@ -401,7 +418,8 @@ def parse_proxy_gateway_text(value: str) -> ProxyConfig:
             f"Passerelle ligne {line_number} : valeur incomplète."
         )
     server = validate_proxy_server(f"http://{host}:{port}")
-    return ProxyConfig(alias, server, username, password)
+    country_code = proxy_country_code(password)
+    return ProxyConfig(alias, server, username, password, country_code)
 
 
 def load_proxy_gateway(path: Path) -> ProxyConfig:

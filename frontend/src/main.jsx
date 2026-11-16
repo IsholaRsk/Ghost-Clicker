@@ -491,7 +491,7 @@ function Gateways({ gateways, pending, mutate }) {
   return (
     <div className="page">
       <PageHeading eyebrow="CONNEXION" title="Réseau" description="Pilotez vos passerelles Rayobyte sans jamais afficher leurs identifiants." action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une passerelle</button>} />
-      <section className="privacy-banner"><ShieldCheck size={21} /><div><strong>Identifiants protégés</strong><p>Les secrets sont conservés dans Supabase Vault et ne sont jamais renvoyés au navigateur.</p></div></section>
+      <section className="privacy-banner"><ShieldCheck size={21} /><div><strong>Identifiants protégés · sorties limitées à US, UK et CA</strong><p>Les secrets sont conservés dans Supabase Vault et ne sont jamais renvoyés au navigateur.</p></div></section>
       <section className="panel resource-panel">
         {!gateways.length ? <EmptyState icon={ServerCog} text="Ajoutez une passerelle pour permettre les visites via Rayobyte." /> : (
           <div className="resource-list">
@@ -499,6 +499,7 @@ function Gateways({ gateways, pending, mutate }) {
               <article className="resource-row gateway-row" key={item.id}>
                 <span className={`resource-icon ${item.active ? "active" : ""}`}><ServerCog size={20} /></span>
                 <div className="resource-copy"><strong>{item.alias}</strong><span>{item.configured ? "Identifiants enregistrés" : "Identifiants à ressaisir"}</span></div>
+                <span className={`country-pill ${item.country ? "" : "invalid"}`}>{item.country ? `Sortie ${item.country}` : "Pays requis"}</span>
                 <span className={`run-pill ${item.active ? "running" : "idle"}`}><span />{item.active ? "Active" : "En veille"}</span>
                 {!item.active && <button className="secondary-button compact" onClick={() => mutate(`/api/gateways/${item.id}/select`, { method: "POST" })}>Activer</button>}
                 <button className="icon-button small" onClick={() => openEdit(item)} aria-label={`Modifier ${item.alias}`}><Pencil size={16} /></button>
@@ -511,9 +512,9 @@ function Gateways({ gateways, pending, mutate }) {
       {editing && (
         <Modal title={editing === "new" ? "Nouvelle passerelle" : "Modifier la passerelle"} close={close}>
           <form className="form-grid" onSubmit={submit}>
-            <Field label="Alias" value={alias} onChange={setAlias} placeholder="Rayobyte France" required />
-            <Field label={editing === "new" ? "Passerelle ou commande curl" : "Nouveaux identifiants (optionnel)"} value={gateway} onChange={setGateway} placeholder="curl https://rayobyte.com/ -x utilisateur:mot-de-passe@hôte:port" type="password" required={editing === "new"} autoComplete="new-password" />
-            <p className="field-help">Collez la valeur brute ou la commande <code>curl … -x …</code> fournie par Rayobyte. Les liens Markdown automatiques sont nettoyés uniquement dans une commande curl cohérente. Aucun secret n’est affiché après sauvegarde.</p>
+            <Field label="Alias" value={alias} onChange={setAlias} placeholder="Rayobyte US" required />
+            <Field label={editing === "new" ? "Passerelle ou commande curl" : "Nouveaux identifiants (optionnel)"} value={gateway} onChange={setGateway} placeholder="curl https://rayobyte.com/ -x utilisateur:mot-de-passe-country-US@hôte:port" type="password" required={editing === "new"} autoComplete="new-password" />
+            <p className="field-help">Collez la valeur brute ou la commande <code>curl … -x …</code> fournie par Rayobyte. Le mot de passe doit finir par <code>-country-US</code>, <code>-country-GB</code> (UK) ou <code>-country-CA</code>. Tout autre pays est refusé.</p>
             {editing === "new" && <label className="check-row"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Définir comme passerelle active</label>}
             <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Annuler</button><button className="primary-button" disabled={pending}><Save size={16} /> Enregistrer</button></div>
           </form>
