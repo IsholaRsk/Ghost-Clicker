@@ -6,6 +6,7 @@ import stat
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -97,8 +98,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=1"', content)
-        self.assertIn('href="/static/app.css?v=1"', content)
+        self.assertIn('src="/static/app.js?v=2"', content)
+        self.assertIn('href="/static/app.css?v=2"', content)
         self.assertIn('name="theme-color" content="#09090b"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
@@ -106,9 +107,10 @@ class WebUploadTests(unittest.TestCase):
 
         self.assertIn("children:`Ghost`", javascript)
         self.assertIn("children:`CLICKER`", javascript)
-        self.assertIn("SOLDE DISPONIBLE", javascript)
-        self.assertIn("250 clics", javascript)
-        self.assertIn("Premiers 500 clics", javascript)
+        self.assertIn("SOLDE HEBDOMADAIRE PROJETÉ", javascript)
+        self.assertIn("Solde de chaque URL", javascript)
+        self.assertIn("Moyenne quotidienne", javascript)
+        self.assertIn("Chaque lundi", javascript)
         self.assertIn("Visite réussie", javascript)
         self.assertIn("Nombre d’exécutions souhaité", javascript)
         self.assertIn("Tout sélectionner", javascript)
@@ -124,40 +126,81 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("utilisateur:mot-de-passe-country-CC", javascript)
         self.assertIn("color-scheme:dark", stylesheet.replace(" ", ""))
         self.assertIn(".mobile-nav", stylesheet)
+        self.assertIn(".url-balance-grid", stylesheet)
         self.assertIn("@media (width<=720px)", stylesheet)
         self.assertNotIn("--canvas:#f4f4f1", stylesheet)
 
-    def test_earnings_use_only_complete_blocks_and_the_second_tier(self):
+    def test_weekly_earnings_use_contiguous_average_daily_tiers(self):
         expected = {
-            0: 0,
-            249: 0,
-            250: 12,
-            499: 12,
-            500: 24,
-            749: 24,
-            750: 32,
-            1_000: 40,
+            99.99: 0,
+            100: 15,
+            149.99: 15,
+            150: 20,
+            201.99: 20,
+            202: 26,
+            251.99: 26,
+            252: 36,
+            2_251.99: 206,
+            2_252: 246,
+            5_000: 246,
         }
-
         self.assertEqual(
-            {clicks: web.calculate_earnings(clicks) for clicks in expected},
+            {
+                clicks: web.weekly_payout_for_average(clicks)
+                for clicks in expected
+            },
             expected,
         )
-        public = web.settings_for_api(
-            {**web.DEFAULT_APP_SETTINGS, "lifetime_successful_visits": 750}
-        )
-        self.assertEqual(public["earnings_balance"], 32)
 
-        web.save_app_settings(
-            {
-                **web.DEFAULT_APP_SETTINGS,
-                "lifetime_successful_visits": 750,
-                "lifetime_metrics_initialized": True,
-            }
+        settings = {
+            **web.DEFAULT_APP_SETTINGS,
+            "targets": [
+                {
+                    "id": "target_weekly_123",
+                    "alias": "Butter",
+                    "url": "https://getallink.com/butter",
+                    "button_text": "",
+                    "second_button_text": "",
+                    "selected": True,
+                }
+            ],
+            "weekly_url_metrics": {
+                "target_weekly_123": {
+                    "2026-11-09": 120,
+                    "2026-11-10": 150,
+                    "2026-11-11": 180,
+                }
+            },
+            "weekly_url_metrics_initialized": True,
+        }
+        now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+
+        earnings = web.weekly_earnings_for_api(settings, now=now)
+        card = earnings["cards"][0]
+
+        self.assertEqual(earnings["week_start"], "2026-11-09")
+        self.assertEqual(earnings["week_end"], "2026-11-15")
+        self.assertEqual(earnings["elapsed_days"], 3)
+        self.assertEqual(card["week_clicks"], 450)
+        self.assertEqual(card["average_daily_clicks"], 150)
+        self.assertEqual(card["projected_payout"], 20)
+        self.assertEqual(card["next_threshold"], 202)
+        self.assertEqual(card["clicks_to_next"], 156)
+        self.assertEqual(earnings["total_projected_payout"], 20)
+        self.assertEqual(earnings["tiers"][0], {
+            "minimum": 100,
+            "maximum": 149,
+            "payout": 15,
+        })
+        self.assertEqual(earnings["tiers"][1]["maximum"], 201)
+
+        with mock.patch("web.cotonou_datetime", return_value=now):
+            public = web.settings_for_api(settings)
+        self.assertEqual(public["earnings_balance"], 20)
+        self.assertEqual(
+            public["weekly_earnings"]["cards"][0]["target_id"],
+            "target_weekly_123",
         )
-        state = self.client.get("/api/state", headers=self.headers).get_json()
-        self.assertEqual(state["settings"]["lifetime_successful_visits"], 750)
-        self.assertEqual(state["settings"]["earnings_balance"], 32)
 
     def test_existing_persisted_reports_initialize_the_click_total(self):
         reports = [
@@ -179,6 +222,50 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(initialized["lifetime_successful_visits"], 2)
         self.assertEqual(
             web.load_app_settings()["lifetime_successful_visits"], 2
+        )
+        self.assertTrue(initialized["weekly_url_metrics_initialized"])
+
+    def test_successful_visits_are_recorded_per_url_in_cotonou_time(self):
+        web.save_app_settings(
+            {
+                **web.DEFAULT_APP_SETTINGS,
+                "targets": [
+                    {
+                        "id": "target_weekly_123",
+                        "alias": "Butter",
+                        "url": "https://getallink.com/butter",
+                        "button_text": "Continuer",
+                        "second_button_text": "",
+                        "selected": True,
+                    }
+                ],
+                "lifetime_metrics_initialized": True,
+                "redirect_success_migrated": True,
+                "weekly_url_metrics_initialized": True,
+            }
+        )
+        result = {
+            "target_id": "target_weekly_123",
+            "started_at": "2026-11-10T23:30:00+00:00",
+            "initial_url": "https://getallink.com/butter",
+            "final_url": "https://destination.example/page",
+            "button_text": "Continuer",
+            "success": True,
+        }
+
+        failed_result = {**result, "success": False}
+        recorded = web.record_successful_visit_results(
+            [result, failed_result]
+        )
+        settings = web.load_app_settings()
+
+        self.assertEqual(recorded, 1)
+        self.assertEqual(settings["lifetime_successful_visits"], 1)
+        self.assertEqual(
+            settings["weekly_url_metrics"]["target_weekly_123"][
+                "2026-11-11"
+            ],
+            1,
         )
 
     def test_legacy_successes_without_a_redirect_are_corrected_once(self):
@@ -853,6 +940,8 @@ class WebUploadTests(unittest.TestCase):
             "lifetime_successful_visits": 0,
             "lifetime_metrics_initialized": False,
             "redirect_success_migrated": False,
+            "weekly_url_metrics": {},
+            "weekly_url_metrics_initialized": False,
         }
         storage = mock.Mock()
         storage.load_settings.return_value = persistent_settings
@@ -949,6 +1038,7 @@ class WebUploadTests(unittest.TestCase):
                         initial_url=targets[0].url,
                         button_text=targets[0].button_text,
                         second_button_text="",
+                        target_id=targets[0].target_id,
                         repetition=repetition,
                         success=repetition == 1,
                     )
@@ -980,8 +1070,12 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertEqual(len(reports[0]["results"]), 2)
         self.assertFalse(reports[0]["in_progress"])
+        saved_settings = web.load_app_settings()
+        self.assertEqual(saved_settings["lifetime_successful_visits"], 1)
+        target_id = saved_settings["targets"][0]["id"]
         self.assertEqual(
-            web.load_app_settings()["lifetime_successful_visits"], 1
+            sum(saved_settings["weekly_url_metrics"][target_id].values()),
+            1,
         )
 
     def test_results_can_be_deleted_by_visit_run_or_all_from_the_api(self):
