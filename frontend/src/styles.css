@@ -16,6 +16,8 @@
   --green-soft: rgba(52, 211, 153, .11);
   --red: #fb7185;
   --red-soft: rgba(251, 113, 133, .11);
+  --gold: #d5b870;
+  --gold-soft: rgba(213, 184, 112, .1);
   font-family: "Avenir Next", Inter, system-ui, -apple-system, sans-serif;
   font-synthesis: none;
 }
@@ -120,6 +122,46 @@ button:disabled { opacity: .42; cursor: not-allowed; transform: none !important;
 .metric-card div > span { color: var(--muted); font-size: 10px; }
 .metric-card strong { margin-top: 2px; font: 700 22px "Avenir Next", Inter, system-ui, sans-serif; letter-spacing: -.5px; }
 .metric-card small { margin-top: 2px; color: #555560; font-size: 9px; }
+.url-earnings-section { margin-top: 30px; }
+.section-heading { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
+.section-heading h2 { margin: 0; font-family: "Avenir Next", Inter, system-ui, sans-serif; font-size: 19px; letter-spacing: -.5px; }
+.section-heading p { margin: 6px 0 0; color: var(--muted-2); font-size: 10px; }
+.url-balance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.url-balance-card { position: relative; overflow: hidden; padding: 20px; border: 1px solid rgba(213, 184, 112, .2); border-radius: 16px; background: radial-gradient(circle at 100% 0, rgba(213, 184, 112, .08), transparent 38%), #101014; }
+.url-balance-card.inactive { opacity: .58; }
+.url-balance-head { display: flex; align-items: center; gap: 11px; }
+.url-balance-head .resource-icon { width: 37px; height: 37px; color: var(--gold); background: var(--gold-soft); }
+.url-balance-head div { min-width: 0; flex: 1; }
+.url-balance-head strong, .url-balance-head span { display: block; }
+.url-balance-head strong { font-size: 12px; }
+.url-balance-head div span { overflow: hidden; margin-top: 3px; color: var(--muted-2); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.url-balance-head > small { padding: 4px 7px; border-radius: 7px; color: var(--muted-2); background: #1b1b20; font-size: 8px; }
+.url-balance-value { display: flex; align-items: flex-end; justify-content: space-between; margin-top: 22px; }
+.url-balance-value span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: 1px; }
+.url-balance-value strong { color: #ead79f; font: 700 24px "Avenir Next", Inter, system-ui, sans-serif; letter-spacing: -.7px; }
+.url-balance-stats { display: grid; grid-template-columns: repeat(2, 1fr); margin: 18px 0 15px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.url-balance-stats div { padding: 12px 0; }
+.url-balance-stats div + div { padding-left: 16px; border-left: 1px solid var(--line-soft); }
+.url-balance-stats strong, .url-balance-stats span { display: block; }
+.url-balance-stats strong { font-size: 14px; }
+.url-balance-stats span { margin-top: 3px; color: var(--muted-2); font-size: 8px; }
+.url-balance-card .progress-track span { background: linear-gradient(90deg, #967a3d, var(--gold)); }
+.url-balance-card .progress-copy strong { color: var(--gold); }
+.daily-clicks { height: 48px; display: grid; grid-template-columns: repeat(7, 1fr); align-items: end; gap: 5px; margin-top: 16px; }
+.daily-clicks > span { height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+.daily-clicks i { width: 100%; min-height: 2px; border-radius: 3px 3px 1px 1px; background: rgba(213, 184, 112, .55); }
+.daily-clicks .future i { background: #222228; }
+.daily-clicks small { color: var(--muted-2); font-size: 7px; }
+.payment-fact { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.payment-fact:first-of-type { margin-top: 12px; }
+.payment-fact span { color: var(--muted-2); font-size: 9px; }
+.payment-fact strong { color: #d8d8dd; font-size: 10px; }
+.tier-schedule { margin-top: 13px; }
+.tier-schedule summary { color: var(--gold); font-size: 9px; cursor: pointer; }
+.tier-schedule > div { max-height: 170px; overflow: auto; margin-top: 10px; padding-right: 4px; }
+.tier-schedule > div span { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 8px; }
+.tier-schedule b { color: var(--muted); font-weight: 500; }
+.tier-schedule em { color: var(--gold); font-style: normal; font-weight: 700; }
 .content-grid { display: grid; grid-template-columns: 1.45fr .75fr; gap: 17px; margin-top: 17px; }
 .activity-panel, .earnings-panel { padding: 25px; }
 .visit-list { margin-top: 16px; }
@@ -281,6 +323,8 @@ td small { max-width: 230px; overflow: hidden; margin-top: 4px; color: #5f5f69; 
   .metric-card strong { font-size: 18px; }
   .metric-card div > span { min-height: 24px; font-size: 9px; }
   .metric-card small { display: none; }
+  .url-earnings-section { margin-top: 24px; }
+  .url-balance-grid { grid-template-columns: 1fr; }
   .content-grid { margin-top: 13px; }
   .activity-panel, .earnings-panel, .settings-panel { padding: 20px; }
   .resource-list { padding: 0 14px; }

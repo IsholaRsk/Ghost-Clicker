@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import random
 import re
@@ -14,7 +15,7 @@ import secrets
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -90,6 +91,8 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "lifetime_successful_visits": 0,
     "lifetime_metrics_initialized": False,
     "redirect_success_migrated": False,
+    "weekly_url_metrics": {},
+    "weekly_url_metrics_initialized": False,
 }
 SAFE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 MAX_TARGET_ALIAS_LENGTH = 100
@@ -97,6 +100,24 @@ MAX_GATEWAYS = 20
 MAX_INTERVAL_EXECUTIONS = 10_000
 MAX_INTERVAL_DURATION_DAYS = 365
 MAX_STORED_VISITS = 500
+WEEKLY_METRIC_RETENTION_DAYS = 35
+COTONOU_TIMEZONE = timezone(timedelta(hours=1), name="Africa/Porto-Novo")
+WEEKLY_PAYMENT_TIERS: tuple[tuple[int, int], ...] = (
+    (100, 15),
+    (150, 20),
+    (202, 26),
+    (252, 36),
+    (302, 46),
+    (452, 56),
+    (602, 71),
+    (702, 86),
+    (902, 106),
+    (1_152, 126),
+    (1_502, 146),
+    (1_752, 176),
+    (2_002, 206),
+    (2_252, 246),
+)
 
 
 def set_database_state(*, configured: bool, connected: bool, error: str = "") -> None:
@@ -558,6 +579,31 @@ def normalize_interval_campaign(value: Any) -> dict[str, Any]:
     }
 
 
+def normalize_weekly_url_metrics(value: Any) -> dict[str, dict[str, int]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, int]] = {}
+    for raw_target_id, raw_days in list(value.items())[:50]:
+        target_id = str(raw_target_id)
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(target_id):
+            continue
+        if not isinstance(raw_days, dict):
+            continue
+        days: dict[str, int] = {}
+        for raw_day, raw_count in list(raw_days.items())[-WEEKLY_METRIC_RETENTION_DAYS:]:
+            day_key = str(raw_day)
+            try:
+                date.fromisoformat(day_key)
+            except ValueError:
+                continue
+            days[day_key] = bounded_integer(
+                raw_count, 0, 0, 9_223_372_036_854_775_807
+            )
+        if days:
+            normalized[target_id] = dict(sorted(days.items()))
+    return normalized
+
+
 def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
     mode = str(value.get("execution_mode", "fixed")).strip().lower()
     if mode not in EXECUTION_MODES:
@@ -618,14 +664,125 @@ def normalize_app_settings(value: dict[str, Any]) -> dict[str, Any]:
         "redirect_success_migrated": bool(
             value.get("redirect_success_migrated", False)
         ),
+        "weekly_url_metrics": normalize_weekly_url_metrics(
+            value.get("weekly_url_metrics", {})
+        ),
+        "weekly_url_metrics_initialized": bool(
+            value.get("weekly_url_metrics_initialized", False)
+        ),
     }
 
 
-def calculate_earnings(successful_visits: int) -> int:
-    """Calcule les gains en dollars à partir des blocs complets de 250 clics."""
+def weekly_payout_for_average(average_daily_clicks: float) -> int:
+    """Renvoie le palier hebdomadaire atteint par la moyenne quotidienne."""
 
-    completed_blocks = max(0, int(successful_visits)) // 250
-    return min(completed_blocks, 2) * 12 + max(completed_blocks - 2, 0) * 8
+    payout = 0
+    for minimum, amount in WEEKLY_PAYMENT_TIERS:
+        if average_daily_clicks < minimum:
+            break
+        payout = amount
+    return payout
+
+
+def cotonou_datetime(value: datetime | None = None) -> datetime:
+    current = value or datetime.now(tz=COTONOU_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(COTONOU_TIMEZONE)
+
+
+def weekly_earnings_for_api(
+    settings: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
+    local_now = cotonou_datetime(now)
+    current_day = local_now.date()
+    week_start = current_day - timedelta(days=current_day.weekday())
+    week_end = week_start + timedelta(days=6)
+    elapsed_days = current_day.weekday() + 1
+    metrics = normalize_weekly_url_metrics(
+        settings.get("weekly_url_metrics", {})
+    )
+    cards: list[dict[str, Any]] = []
+    for target in settings.get("targets", []):
+        if not isinstance(target, dict):
+            continue
+        target_id = str(target.get("id", ""))
+        target_days = metrics.get(target_id, {})
+        daily_clicks = []
+        week_clicks = 0
+        for offset in range(7):
+            day = week_start + timedelta(days=offset)
+            count = int(target_days.get(day.isoformat(), 0))
+            if offset < elapsed_days:
+                week_clicks += count
+            daily_clicks.append(
+                {
+                    "date": day.isoformat(),
+                    "clicks": count,
+                    "elapsed": offset < elapsed_days,
+                }
+            )
+        average = week_clicks / elapsed_days
+        payout = weekly_payout_for_average(average)
+        reached_minimum = 0
+        next_threshold: int | None = None
+        for minimum, _amount in WEEKLY_PAYMENT_TIERS:
+            if minimum <= average:
+                reached_minimum = minimum
+            else:
+                next_threshold = minimum
+                break
+        if next_threshold is None:
+            progress = 100.0
+            clicks_to_next = 0
+        else:
+            interval = next_threshold - reached_minimum
+            progress = max(
+                0.0,
+                min(100.0, ((average - reached_minimum) / interval) * 100),
+            )
+            clicks_to_next = max(
+                0, math.ceil((next_threshold * elapsed_days) - week_clicks)
+            )
+        cards.append(
+            {
+                "target_id": target_id,
+                "alias": str(target.get("alias", "")),
+                "url": str(target.get("url", "")),
+                "selected": bool(target.get("selected", True)),
+                "week_clicks": week_clicks,
+                "average_daily_clicks": round(average, 2),
+                "projected_payout": payout,
+                "next_threshold": next_threshold,
+                "clicks_to_next": clicks_to_next,
+                "progress_percent": round(progress, 2),
+                "daily_clicks": daily_clicks,
+            }
+        )
+    tiers = [
+        {
+            "minimum": minimum,
+            "maximum": (
+                WEEKLY_PAYMENT_TIERS[index + 1][0] - 1
+                if index + 1 < len(WEEKLY_PAYMENT_TIERS)
+                else None
+            ),
+            "payout": amount,
+        }
+        for index, (minimum, amount) in enumerate(WEEKLY_PAYMENT_TIERS)
+    ]
+    return {
+        "timezone": "Africa/Porto-Novo",
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "elapsed_days": elapsed_days,
+        "total_week_clicks": sum(card["week_clicks"] for card in cards),
+        "total_projected_payout": sum(
+            card["projected_payout"] for card in cards
+        ),
+        "cards": cards,
+        "tiers": tiers,
+    }
 
 
 def settings_for_api(value: dict[str, Any]) -> dict[str, Any]:
@@ -646,9 +803,11 @@ def settings_for_api(value: dict[str, Any]) -> dict[str, Any]:
     public_settings = {
         key: value.get(key, DEFAULT_APP_SETTINGS[key]) for key in keys
     }
-    public_settings["earnings_balance"] = calculate_earnings(
-        int(public_settings["lifetime_successful_visits"])
-    )
+    weekly_earnings = weekly_earnings_for_api(value)
+    public_settings["weekly_earnings"] = weekly_earnings
+    public_settings["earnings_balance"] = weekly_earnings[
+        "total_projected_payout"
+    ]
     return public_settings
 
 
@@ -748,34 +907,79 @@ def count_legacy_redirect_false_positives(
     )
 
 
+def visit_day_in_cotonou(result: dict[str, Any]) -> str:
+    raw_started_at = str(result.get("started_at", "")).strip()
+    if raw_started_at:
+        try:
+            started_at = datetime.fromisoformat(
+                raw_started_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            started_at = datetime.now(tz=COTONOU_TIMEZONE)
+    else:
+        started_at = datetime.now(tz=COTONOU_TIMEZONE)
+    return cotonou_datetime(started_at).date().isoformat()
+
+
+def weekly_metrics_from_reports(
+    reports: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    metrics: dict[str, dict[str, int]] = {}
+    for report in reports:
+        for result in report.get("results", []):
+            if not isinstance(result, dict) or not is_successful_visit_result(result):
+                continue
+            target_id = str(result.get("target_id", ""))
+            if not SAFE_IDENTIFIER_PATTERN.fullmatch(target_id):
+                continue
+            day_key = visit_day_in_cotonou(result)
+            target_days = metrics.setdefault(target_id, {})
+            target_days[day_key] = target_days.get(day_key, 0) + 1
+    return normalize_weekly_url_metrics(metrics)
+
+
+def apply_metric_migrations(
+    settings: dict[str, Any], reports: list[dict[str, Any]]
+) -> dict[str, Any]:
+    initialized = bool(settings.get("lifetime_metrics_initialized", False))
+    migrated = bool(settings.get("redirect_success_migrated", False))
+    if not initialized:
+        settings["lifetime_successful_visits"] = count_successful_visits(reports)
+        settings["lifetime_metrics_initialized"] = True
+    elif not migrated:
+        false_positives = count_legacy_redirect_false_positives(reports)
+        settings["lifetime_successful_visits"] = max(
+            0,
+            int(settings.get("lifetime_successful_visits", 0))
+            - false_positives,
+        )
+    settings["redirect_success_migrated"] = True
+    if not settings.get("weekly_url_metrics_initialized", False):
+        settings["weekly_url_metrics"] = weekly_metrics_from_reports(reports)
+        settings["weekly_url_metrics_initialized"] = True
+    return settings
+
+
 def initialize_lifetime_metrics(
     settings: dict[str, Any], reports: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Reprend l'historique et corrige les succès sans redirection une fois."""
+    """Reprend l'historique et initialise les métriques de rémunération."""
 
-    if settings.get("lifetime_metrics_initialized", False) and settings.get(
-        "redirect_success_migrated", False
+    if (
+        settings.get("lifetime_metrics_initialized", False)
+        and settings.get("redirect_success_migrated", False)
+        and settings.get("weekly_url_metrics_initialized", False)
     ):
         return settings
     with METRICS_LOCK:
         current = load_app_settings()
-        initialized = bool(current.get("lifetime_metrics_initialized", False))
-        migrated = bool(current.get("redirect_success_migrated", False))
-        if initialized and migrated:
+        if (
+            current.get("lifetime_metrics_initialized", False)
+            and current.get("redirect_success_migrated", False)
+            and current.get("weekly_url_metrics_initialized", False)
+        ):
             return current
-        if not initialized:
-            current["lifetime_successful_visits"] = count_successful_visits(
-                reports
-            )
-            current["lifetime_metrics_initialized"] = True
-        elif not migrated:
-            false_positives = count_legacy_redirect_false_positives(reports)
-            current["lifetime_successful_visits"] = max(
-                0,
-                int(current.get("lifetime_successful_visits", 0))
-                - false_positives,
-            )
-        current["redirect_success_migrated"] = True
+        current = apply_metric_migrations(current, reports)
         try:
             save_app_settings(current)
         except (ConfigurationError, OSError):
@@ -784,36 +988,50 @@ def initialize_lifetime_metrics(
         return current
 
 
-def increment_lifetime_successful_visits(delta: int) -> int:
-    """Ajoute atomiquement les visites réussies au compteur de rémunération."""
+def record_successful_visit_results(results: list[dict[str, Any]]) -> int:
+    """Persiste en une fois les totaux globaux et quotidiens par URL."""
 
-    if delta < 1:
+    successful = [result for result in results if is_successful_visit_result(result)]
+    if not successful:
         return 0
     with METRICS_LOCK:
         settings = load_app_settings()
-        reports = load_reports(all_data=True)
-        initialized = bool(settings.get("lifetime_metrics_initialized", False))
-        if not initialized:
-            # Le rapport de la visite courante a déjà été persisté : le
-            # comptage initial la contient et il ne faut pas ajouter delta.
-            settings["lifetime_successful_visits"] = count_successful_visits(
-                reports
-            )
-            settings["lifetime_metrics_initialized"] = True
-        elif not settings.get("redirect_success_migrated", False):
-            false_positives = count_legacy_redirect_false_positives(reports)
-            settings["lifetime_successful_visits"] = max(
-                0,
+        lifetime_was_initialized = bool(
+            settings.get("lifetime_metrics_initialized", False)
+        )
+        weekly_was_initialized = bool(
+            settings.get("weekly_url_metrics_initialized", False)
+        )
+        needs_migration = not (
+            lifetime_was_initialized
+            and settings.get("redirect_success_migrated", False)
+            and weekly_was_initialized
+        )
+        reports = load_reports(all_data=True) if needs_migration else []
+        settings = apply_metric_migrations(settings, reports)
+        if lifetime_was_initialized:
+            settings["lifetime_successful_visits"] = min(
                 int(settings.get("lifetime_successful_visits", 0))
-                - false_positives,
+                + len(successful),
+                9_223_372_036_854_775_807,
             )
-        settings["redirect_success_migrated"] = True
-        current = int(settings.get("lifetime_successful_visits", 0))
-        increment = delta if initialized else 0
-        updated = min(current + increment, 9_223_372_036_854_775_807)
-        settings["lifetime_successful_visits"] = updated
+        if weekly_was_initialized:
+            metrics = normalize_weekly_url_metrics(
+                settings.get("weekly_url_metrics", {})
+            )
+            for result in successful:
+                target_id = str(result.get("target_id", ""))
+                if not SAFE_IDENTIFIER_PATTERN.fullmatch(target_id):
+                    continue
+                day_key = visit_day_in_cotonou(result)
+                target_days = metrics.setdefault(target_id, {})
+                target_days[day_key] = min(
+                    target_days.get(day_key, 0) + 1,
+                    9_223_372_036_854_775_807,
+                )
+            settings["weekly_url_metrics"] = normalize_weekly_url_metrics(metrics)
         save_app_settings(settings)
-        return updated
+        return len(successful)
 
 
 def read_reports_unlocked() -> list[dict[str, Any]]:
@@ -1245,16 +1463,18 @@ def execute_job(
             upsert_report(report_value(report, in_progress=True))
             if report.completed_visits > metrics_processed_visits:
                 first_available_visit = report.discarded_results + 1
-                successful_delta = sum(
-                    1
+                serialized_results = report.to_dict()["results"]
+                successful_results = [
+                    result
                     for visit_number, result in enumerate(
-                        report.results, start=first_available_visit
+                        serialized_results, start=first_available_visit
                     )
-                    if visit_number > metrics_processed_visits and result.success
-                )
+                    if visit_number > metrics_processed_visits
+                    and is_successful_visit_result(result)
+                ]
                 try:
-                    if successful_delta:
-                        increment_lifetime_successful_visits(successful_delta)
+                    if successful_results:
+                        record_successful_visit_results(successful_results)
                 except (ConfigurationError, OSError):
                     # Le rapport reste prioritaire ; le compteur sera retenté
                     # au prochain progrès tant que les résultats sont disponibles.
@@ -2599,12 +2819,12 @@ def home() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#09090b">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=1">
+<link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=1" defer></script>
+<script src="/static/app.js?v=2" defer></script>
 </body>
 </html>"""
 

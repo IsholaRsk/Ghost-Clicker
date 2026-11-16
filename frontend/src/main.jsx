@@ -51,22 +51,6 @@ const navigation = [
 
 const tabsWithPoll = new Set(["home", "results"]);
 
-function moneyForClicks(clicks) {
-  const blocks = Math.floor(Math.max(0, Number(clicks) || 0) / 250);
-  return Math.min(blocks, 2) * 12 + Math.max(blocks - 2, 0) * 8;
-}
-
-function nextMilestone(clicks) {
-  const value = Math.max(0, Number(clicks) || 0);
-  const completed = Math.floor(value / 250);
-  const inBlock = value % 250;
-  return {
-    remaining: inBlock === 0 ? 250 : 250 - inBlock,
-    progress: (inBlock / 250) * 100,
-    reward: completed < 2 ? 12 : 8,
-  };
-}
-
 function number(value) {
   return new Intl.NumberFormat("fr-FR").format(Number(value) || 0);
 }
@@ -80,6 +64,15 @@ function dateTime(value) {
     month: "short",
     hour: "2-digit",
     minute: "2-digit",
+  }).format(parsed);
+}
+
+function shortDate(value) {
+  if (!value) return "—";
+  const parsed = new Date(`${value}T12:00:00+01:00`);
+  return new Intl.DateTimeFormat("fr-FR", {
+    day: "2-digit",
+    month: "short",
   }).format(parsed);
 }
 
@@ -287,15 +280,21 @@ function PageHeading({ eyebrow, title, description, action }) {
 
 function Dashboard({ run, targets, reports, settings, pending, mutate, refreshStatus, goTo }) {
   const results = useMemo(() => reportResults(reports), [reports]);
-  const successfulClicks = Number(settings.lifetime_successful_visits) || 0;
-  const balance = Number.isFinite(Number(settings.earnings_balance))
-    ? Number(settings.earnings_balance)
-    : moneyForClicks(successfulClicks);
-  const milestone = nextMilestone(successfulClicks);
+  const weekly = settings.weekly_earnings || {
+    cards: [],
+    tiers: [],
+    total_week_clicks: 0,
+    total_projected_payout: 0,
+    elapsed_days: 1,
+  };
+  const balance = Number(weekly.total_projected_payout) || 0;
+  const successfulClicks = Number(weekly.total_week_clicks) || 0;
+  const elapsedDays = Number(weekly.elapsed_days) || 1;
   const recent = results.slice(0, 5);
   const failures = results.filter((item) => !item.success).length;
   const visibleSuccess = results.length ? Math.round(((results.length - failures) / results.length) * 100) : 0;
   const selectedTargets = targets.filter((target) => target.selected !== false).length;
+  const paidTargets = (weekly.cards || []).filter((card) => card.projected_payout > 0).length;
   const engineActive = Boolean(run.running || run.interval_campaign_active);
 
   return (
@@ -303,20 +302,20 @@ function Dashboard({ run, targets, reports, settings, pending, mutate, refreshSt
       <PageHeading
         eyebrow="VUE D’ENSEMBLE"
         title="Bonjour, opérateur"
-        description="Voici l’activité de votre moteur d’automatisation aujourd’hui."
+        description="Suivez les visites réussies et la rémunération projetée de chaque URL."
         action={<button className="icon-button" onClick={() => refreshStatus(false)} aria-label="Actualiser"><RefreshCw size={18} /></button>}
       />
 
       <section className="dashboard-grid">
         <article className="balance-card">
-          <div className="balance-topline"><span>SOLDE DISPONIBLE</span><WalletCards size={22} /></div>
+          <div className="balance-topline"><span>SOLDE HEBDOMADAIRE PROJETÉ</span><WalletCards size={22} /></div>
           <div className="balance-value"><span>$</span>{balance.toFixed(2)}</div>
           <div className="balance-meta">
-            <div><strong>{number(successfulClicks)}</strong><span>clics réussis au total</span></div>
-            <span className="balance-rule">250 clics = {milestone.reward}$</span>
+            <div><strong>{number(successfulClicks)}</strong><span>clics réussis cette semaine</span></div>
+            <span className="balance-rule">Moyenne sur {elapsedDays} jour{elapsedDays > 1 ? "s" : ""}</span>
           </div>
-          <div className="progress-track"><span style={{ width: `${milestone.progress}%` }} /></div>
-          <div className="progress-copy"><span>{number(milestone.remaining)} clics avant le prochain palier</span><strong>+${milestone.reward}</strong></div>
+          <div className="progress-track"><span style={{ width: `${Math.min(100, (elapsedDays / 7) * 100)}%` }} /></div>
+          <div className="progress-copy"><span>{shortDate(weekly.week_start)} — {shortDate(weekly.week_end)}</span><strong>Paiement lundi</strong></div>
           <div className="card-orbits" aria-hidden="true" />
         </article>
 
@@ -342,8 +341,17 @@ function Dashboard({ run, targets, reports, settings, pending, mutate, refreshSt
 
       <section className="metrics-grid" aria-label="Indicateurs récents">
         <Metric icon={CheckCircle2} label="Taux de réussite" value={`${visibleSuccess}%`} detail={`${results.length} résultats récents`} tone="green" />
-        <Metric icon={Radio} label="URLs actives" value={selectedTargets} detail={`${targets.length} configurées`} tone="violet" />
+        <Metric icon={Radio} label="URLs rémunérées" value={paidTargets} detail={`${targets.length} configurées`} tone="violet" />
         <Metric icon={OctagonX} label="Échecs récents" value={failures} detail="Sur les résultats conservés" tone="red" />
+      </section>
+
+      <section className="url-earnings-section">
+        <div className="section-heading"><div><span className="eyebrow">RÉMUNÉRATION PAR CIBLE</span><h2>Solde de chaque URL</h2><p>Projection basée sur la moyenne quotidienne depuis lundi, heure de Cotonou.</p></div></div>
+        {(weekly.cards || []).length ? (
+          <div className="url-balance-grid">
+            {weekly.cards.map((card) => <UrlBalanceCard card={card} key={card.target_id} />)}
+          </div>
+        ) : <div className="panel"><EmptyState icon={WalletCards} text="Ajoutez une URL pour commencer à suivre sa rémunération." /></div>}
       </section>
 
       <section className="content-grid">
@@ -352,13 +360,34 @@ function Dashboard({ run, targets, reports, settings, pending, mutate, refreshSt
           <VisitList results={recent} empty="Les visites apparaîtront ici après la première exécution." />
         </article>
         <article className="panel earnings-panel">
-          <div className="panel-title-row"><div><span className="eyebrow">RÉMUNÉRATION</span><h2>Barème</h2></div><CircleDollarSign size={21} /></div>
-          <div className="tier"><span className="tier-number">01</span><div><strong>Premiers 500 clics</strong><p>Deux blocs complets maximum</p></div><b>$12<small>/ 250</small></b></div>
-          <div className="tier"><span className="tier-number">02</span><div><strong>À partir de 501 clics</strong><p>Chaque bloc complet suivant</p></div><b>$8<small>/ 250</small></b></div>
-          <p className="fine-print"><ShieldCheck size={15} /> Un clic correspond à une visite réussie. Les échecs ne sont jamais comptés.</p>
+          <div className="panel-title-row"><div><span className="eyebrow">PAIEMENT</span><h2>Règles de la semaine</h2></div><CircleDollarSign size={21} /></div>
+          <div className="payment-fact"><span>Versement</span><strong>Chaque lundi</strong></div>
+          <div className="payment-fact"><span>Mode</span><strong>Crypto sécurisée</strong></div>
+          <div className="payment-fact"><span>Pays éligibles</span><strong>US · UK · CA</strong></div>
+          <div className="payment-fact"><span>Calcul</span><strong>Moyenne quotidienne</strong></div>
+          <details className="tier-schedule"><summary>Voir les {weekly.tiers?.length || 14} paliers</summary><div>{(weekly.tiers || []).map((tier) => <span key={tier.minimum}><b>{number(tier.minimum)}{tier.maximum ? `–${number(tier.maximum)}` : "+"}</b><em>${tier.payout}</em></span>)}</div></details>
+          <p className="fine-print"><ShieldCheck size={15} /> Une visite compte uniquement après une redirection réussie. Les échecs ne sont jamais rémunérés.</p>
         </article>
       </section>
     </div>
+  );
+}
+
+function UrlBalanceCard({ card }) {
+  const average = Number(card.average_daily_clicks) || 0;
+  return (
+    <article className={`url-balance-card ${card.selected ? "" : "inactive"}`}>
+      <div className="url-balance-head">
+        <span className="resource-icon"><Globe2 size={18} /></span>
+        <div><strong>{card.alias || "URL"}</strong><span>{card.url}</span></div>
+        {!card.selected && <small>Inactive</small>}
+      </div>
+      <div className="url-balance-value"><span>Solde projeté</span><strong>${Number(card.projected_payout || 0).toFixed(2)}</strong></div>
+      <div className="url-balance-stats"><div><strong>{number(card.week_clicks)}</strong><span>cette semaine</span></div><div><strong>{number(average.toFixed(2))}</strong><span>clics / jour</span></div></div>
+      <div className="progress-track"><span style={{ width: `${card.progress_percent || 0}%` }} /></div>
+      <div className="progress-copy">{card.next_threshold ? <><span>{number(card.clicks_to_next)} clics avant le prochain palier</span><strong>{number(card.next_threshold)}/jour</strong></> : <><span>Palier maximal atteint</span><strong>$246</strong></>}</div>
+      <div className="daily-clicks" aria-label="Clics quotidiens de la semaine">{(card.daily_clicks || []).map((day) => <span className={day.elapsed ? "elapsed" : "future"} key={day.date}><i style={{ height: `${Math.min(100, day.clicks ? 18 + Math.log10(day.clicks + 1) * 25 : 4)}%` }} /><small>{number(day.clicks)}</small></span>)}</div>
+    </article>
   );
 }
 
