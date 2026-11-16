@@ -68,13 +68,19 @@ Les tables utilisent Row Level Security et n’accordent aucun accès aux rôles
 
 ### 3. Préparer la passerelle et les cibles
 
-Chaque passerelle Rayobyte utilise exactement cette valeur, sans lien `mailto:` ni mise en forme Markdown :
+Chaque passerelle Rayobyte peut être collée comme valeur brute :
 
 ```text
 username:password-country-CA@us-east.gw.rayobyte.com:8000
 ```
 
-Le suffixe Rayobyte `-country-CA` fait partie du mot de passe de routage et est accepté tel quel. N’ajoutez jamais les crochets ou la partie `(mailto:...)` qu’une messagerie peut afficher automatiquement.
+ou comme commande `curl` complète fournie par Rayobyte :
+
+```text
+curl https://rayobyte.com/ -x username:password-country-US@us-east.gw.rayobyte.com:8000
+```
+
+Les options `-x`, `-xVALEUR`, `--proxy` et `--proxy=VALEUR` sont reconnues sans jamais exécuter la commande. Le suffixe Rayobyte `-country-CC` fait partie du mot de passe de routage et reste accepté tel quel. Lorsqu’une messagerie transforme automatiquement le proxy de la commande `curl` en lien Markdown `mailto:`, Ghost Clicker retire uniquement cet emballage après avoir vérifié sa cohérence. Une valeur Markdown isolée, hors d’une commande `curl`, reste refusée.
 
 La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Une seule entrée est active à la fois. Le pseudo, l’identifiant interne et la sélection active persistent dans les réglages Supabase. Les identifiants Rayobyte sont conservés durablement et chiffrés dans **Supabase Vault** ; ils ne sont jamais inclus dans les réglages, les réponses de l’API, les journaux ou Git. Un cache privé en mode `0600` dans `/tmp/ghost-clicker-proxy-gateways.json` sert uniquement à l’exécution locale. Après leur première saisie avec cette version, les passerelles restent disponibles après les redémarrages et redéploiements. La passerelle active doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 

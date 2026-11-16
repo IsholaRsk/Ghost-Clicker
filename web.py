@@ -2819,12 +2819,12 @@ def home() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#09090b">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=2">
+<link rel="stylesheet" href="/static/app.css?v=3">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=2" defer></script>
+<script src="/static/app.js?v=3" defer></script>
 </body>
 </html>"""
 

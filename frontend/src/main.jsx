@@ -512,8 +512,8 @@ function Gateways({ gateways, pending, mutate }) {
         <Modal title={editing === "new" ? "Nouvelle passerelle" : "Modifier la passerelle"} close={close}>
           <form className="form-grid" onSubmit={submit}>
             <Field label="Alias" value={alias} onChange={setAlias} placeholder="Rayobyte France" required />
-            <Field label={editing === "new" ? "Passerelle" : "Nouveaux identifiants (optionnel)"} value={gateway} onChange={setGateway} placeholder="nom:mot-de-passe@hôte:port" type="password" required={editing === "new"} autoComplete="new-password" />
-            <p className="field-help">Formats pris en charge : <code>utilisateur:mot-de-passe-country-CC@hôte:port</code> ou URL proxy. Aucun secret n’est affiché après sauvegarde.</p>
+            <Field label={editing === "new" ? "Passerelle ou commande curl" : "Nouveaux identifiants (optionnel)"} value={gateway} onChange={setGateway} placeholder="curl https://rayobyte.com/ -x utilisateur:mot-de-passe@hôte:port" type="password" required={editing === "new"} autoComplete="new-password" />
+            <p className="field-help">Collez la valeur brute ou la commande <code>curl … -x …</code> fournie par Rayobyte. Les liens Markdown automatiques sont nettoyés uniquement dans une commande curl cohérente. Aucun secret n’est affiché après sauvegarde.</p>
             {editing === "new" && <label className="check-row"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Définir comme passerelle active</label>}
             <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Annuler</button><button className="primary-button" disabled={pending}><Save size={16} /> Enregistrer</button></div>
           </form>

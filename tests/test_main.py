@@ -180,6 +180,39 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.username, "sample-user")
         self.assertEqual(gateway.password, "sample-pass-country-CA")
 
+    def test_parses_a_rayobyte_curl_proxy_command(self):
+        gateway = main.parse_proxy_gateway_text(
+            "curl https://rayobyte.com/ -x "
+            "sample-user:sample-pass-country-US@us-east.gw.rayobyte.com:8000"
+        )
+
+        self.assertEqual(gateway.server, "http://us-east.gw.rayobyte.com:8000")
+        self.assertEqual(gateway.username, "sample-user")
+        self.assertEqual(gateway.password, "sample-pass-country-US")
+
+    def test_parses_a_curl_command_with_automatic_markdown_links(self):
+        gateway = main.parse_proxy_gateway_text(
+            "curl [https://rayobyte.com/](https://rayobyte.com/) -x "
+            "sample-user:[sample-pass-country-US@proxy.example]"
+            "(mailto:sample-pass-country-US@proxy.example):8000"
+        )
+
+        self.assertEqual(gateway.server, "http://proxy.example:8000")
+        self.assertEqual(gateway.username, "sample-user")
+        self.assertEqual(gateway.password, "sample-pass-country-US")
+
+    def test_parses_curl_long_and_attached_proxy_options(self):
+        for option in (
+            "--proxy sample-user:sample-pass@proxy.example:8000",
+            "--proxy=sample-user:sample-pass@proxy.example:8000",
+            "-xsample-user:sample-pass@proxy.example:8000",
+        ):
+            with self.subTest(option=option):
+                gateway = main.parse_proxy_gateway_text(
+                    f"curl {option} https://rayobyte.com/"
+                )
+                self.assertEqual(gateway.server, "http://proxy.example:8000")
+
     def test_rejects_mailto_or_markdown_wrappers_without_echoing_credentials(self):
         wrapped = (
             "sample-user:[SENSITIVE_PASSWORD-country-CA@proxy.example:8000]"
