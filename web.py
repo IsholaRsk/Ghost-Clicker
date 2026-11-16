@@ -452,11 +452,26 @@ def validate_gateway_alias(value: str) -> str:
 
 def gateways_for_api(settings: dict[str, Any]) -> list[dict[str, Any]]:
     secrets_by_id = read_gateway_secrets()
-    return [
-        {**gateway, "configured": gateway["id"] in secrets_by_id}
-        for gateway in settings.get("gateways", [])
-        if isinstance(gateway, dict)
-    ]
+    values: list[dict[str, Any]] = []
+    for gateway in settings.get("gateways", []):
+        if not isinstance(gateway, dict):
+            continue
+        secret = secrets_by_id.get(str(gateway.get("id", "")))
+        country_code = ""
+        if secret:
+            try:
+                country_code = parse_proxy_gateway_text(secret).country_code
+            except ConfigurationError:
+                pass
+        values.append(
+            {
+                **gateway,
+                "configured": bool(secret),
+                "country_code": country_code,
+                "country": "UK" if country_code == "GB" else country_code,
+            }
+        )
+    return values
 
 
 def migrate_legacy_gateway(settings: dict[str, Any]) -> None:
@@ -508,6 +523,16 @@ def sync_active_gateway(settings: dict[str, Any]) -> bool:
             ) from exc
         return False
     alias = validate_gateway_alias(str(active.get("alias", "")))
+    try:
+        parse_proxy_gateway_text(secret)
+    except ConfigurationError:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ConfigurationError(
+                "Impossible de désactiver la passerelle non conforme."
+            ) from exc
+        return False
     atomic_write_private_text(path, f"# alias: {alias}\n{secret.strip()}\n")
     return True
 
@@ -1993,6 +2018,7 @@ def api_select_gateway(gateway_id: str) -> tuple[Response, int] | Response:
             raise ConfigurationError(
                 "Ressaisissez les identifiants avant d'activer cette passerelle."
             )
+        parse_proxy_gateway_text(secrets_by_id[gateway_id])
         settings = load_app_settings()
         gateways = list(settings.get("gateways", []))
         if not any(item.get("id") == gateway_id for item in gateways):
@@ -2817,14 +2843,14 @@ def home() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#09090b">
+<meta name="theme-color" content="#0c0d0f">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=3">
+<link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=3" defer></script>
+<script src="/static/app.js?v=5" defer></script>
 </body>
 </html>"""
 

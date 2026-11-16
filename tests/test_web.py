@@ -98,9 +98,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=3"', content)
-        self.assertIn('href="/static/app.css?v=3"', content)
-        self.assertIn('name="theme-color" content="#09090b"', content)
+        self.assertIn('src="/static/app.js?v=5"', content)
+        self.assertIn('href="/static/app.css?v=5"', content)
+        self.assertIn('name="theme-color" content="#0c0d0f"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
         self.assertNotIn("sample-pass", content)
@@ -125,10 +125,17 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("/results.csv", javascript)
         self.assertIn("Passerelle ou commande curl", javascript)
         self.assertIn("curl … -x …", javascript)
+        self.assertIn("sorties limitées à US, UK et CA", javascript)
+        self.assertIn("-country-GB", javascript)
+        self.assertIn("Pays requis", javascript)
         self.assertIn("color-scheme:dark", stylesheet.replace(" ", ""))
+        self.assertIn("--accent:#8ea3bf", stylesheet)
         self.assertIn(".mobile-nav", stylesheet)
+        self.assertIn(".country-pill", stylesheet)
         self.assertIn(".url-balance-grid", stylesheet)
         self.assertIn("@media (width<=720px)", stylesheet)
+        self.assertNotIn("linear-gradient", stylesheet)
+        self.assertNotIn("radial-gradient", stylesheet)
         self.assertNotIn("--canvas:#f4f4f1", stylesheet)
 
     def test_weekly_earnings_use_contiguous_average_daily_tiers(self):
@@ -330,7 +337,7 @@ class WebUploadTests(unittest.TestCase):
         )
 
     def test_gateway_upload_is_authenticated_parsed_and_stored_with_mode_0600(self):
-        line = "sample-user:sample-pass@proxy.example:8000"
+        line = "sample-user:sample-pass-country-US@proxy.example:8000"
         response = self.client.post(
             "/gateway",
             data={"csrf_token": web.CSRF_TOKEN, "gateway": line},
@@ -356,7 +363,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertNotIn(line, home.get_data(as_text=True))
 
     def test_invalid_gateway_upload_does_not_replace_existing_secret_file(self):
-        original = "sample-user:sample-pass@proxy.example:8000\n"
+        original = "sample-user:sample-pass-country-CA@proxy.example:8000\n"
         self.gateway_path.parent.mkdir(parents=True)
         self.gateway_path.write_text(original, encoding="utf-8")
 
@@ -376,9 +383,71 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(self.gateway_path.read_text(encoding="utf-8"), original)
         self.assertNotIn("invalid-sensitive-content", query["error"][0])
 
+    def test_gateway_registration_rejects_missing_or_unsupported_countries(self):
+        values = (
+            "sample-user:SENSITIVE_PASSWORD@proxy.example:8000",
+            "sample-user:SENSITIVE_PASSWORD-country-FR@proxy.example:8000",
+            "sample-user:SENSITIVE_PASSWORD-country-UK@proxy.example:8000",
+        )
+
+        for value in values:
+            with self.subTest(value=value):
+                response = self.client.post(
+                    "/api/gateways",
+                    json={"alias": "Pays refusé", "gateway": value},
+                    headers=self.api_headers,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn("SENSITIVE_PASSWORD", response.get_data(as_text=True))
+
+        self.assertEqual(web.load_app_settings()["gateways"], [])
+        self.assertEqual(web.read_gateway_secrets(), {})
+        self.assertFalse(self.gateway_path.exists())
+
+    def test_legacy_gateway_without_allowed_country_cannot_be_used_or_selected(self):
+        legacy_secret = "sample-user:SENSITIVE_PASSWORD@proxy.example:8000"
+        gateway_id = "gateway_legacy_countryless"
+        web.save_app_settings(
+            {
+                **web.DEFAULT_APP_SETTINGS,
+                "gateways": [
+                    {"id": gateway_id, "alias": "Ancienne", "active": True}
+                ],
+            }
+        )
+        web.write_gateway_secrets({gateway_id: legacy_secret})
+
+        state = self.client.get("/api/state", headers=self.headers)
+
+        self.assertEqual(state.status_code, 200)
+        self.assertFalse(state.get_json()["gateway_ready"])
+        gateway = state.get_json()["gateways"][0]
+        self.assertTrue(gateway["configured"])
+        self.assertEqual(gateway["country_code"], "")
+        self.assertEqual(gateway["country"], "")
+        self.assertNotIn("SENSITIVE_PASSWORD", state.get_data(as_text=True))
+        self.assertFalse(self.gateway_path.exists())
+
+        selected = self.client.post(
+            f"/api/gateways/{gateway_id}/select",
+            json={},
+            headers=self.api_headers,
+        )
+        self.assertEqual(selected.status_code, 400)
+        self.assertIn("country-US", selected.get_json()["error"])
+        self.assertNotIn("SENSITIVE_PASSWORD", selected.get_data(as_text=True))
+        self.assertFalse(self.gateway_path.exists())
+
     def test_gateway_crud_keeps_secrets_out_of_settings_and_handles_cache_loss(self):
-        first_gateway = "sample-user-a:sample-pass-a@proxy-a.example:8000"
-        second_gateway = "sample-user-b:sample-pass-b@proxy-b.example:8001"
+        first_gateway = (
+            "sample-user-a:sample-pass-a-country-US@proxy-a.example:8000"
+        )
+        second_gateway = (
+            "sample-user-b:sample-pass-b-country-GB@proxy-b.example:8001"
+        )
+        replacement_gateway = (
+            "sample-user-a:sample-pass-a-country-CA@proxy-a.example:8000"
+        )
 
         created = self.client.post(
             "/api/gateways",
@@ -394,6 +463,25 @@ class WebUploadTests(unittest.TestCase):
         first = created.get_json()["gateways"][0]
         self.assertTrue(first["active"])
         self.assertTrue(first["configured"])
+        self.assertEqual(first["country_code"], "US")
+        self.assertEqual(first["country"], "US")
+        first_id = first["id"]
+
+        refused_update = self.client.patch(
+            f"/api/gateways/{first_id}",
+            json={
+                "gateway": (
+                    "sample-user-a:SENSITIVE_PASSWORD-country-FR"
+                    "@proxy-a.example:8000"
+                )
+            },
+            headers=self.api_headers,
+        )
+        self.assertEqual(refused_update.status_code, 400)
+        self.assertNotIn(
+            "SENSITIVE_PASSWORD", refused_update.get_data(as_text=True)
+        )
+        self.assertEqual(web.read_gateway_secrets()[first_id], first_gateway)
 
         raw_settings = self.settings_path.read_text(encoding="utf-8")
         self.assertIn("Rayobyte principale", raw_settings)
@@ -417,6 +505,8 @@ class WebUploadTests(unittest.TestCase):
         second_id = gateways[1]["id"]
         self.assertFalse(gateways[0]["active"])
         self.assertTrue(gateways[1]["active"])
+        self.assertEqual(gateways[1]["country_code"], "GB")
+        self.assertEqual(gateways[1]["country"], "UK")
         active_text = self.gateway_path.read_text(encoding="utf-8")
         self.assertIn("# alias: Rayobyte secours", active_text)
         self.assertIn(second_gateway, active_text)
@@ -428,6 +518,17 @@ class WebUploadTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertTrue(updated.get_json()["gateways"][0]["configured"])
+        self.assertEqual(updated.get_json()["gateways"][0]["country"], "US")
+
+        updated = self.client.patch(
+            f"/api/gateways/{first_id}",
+            json={"gateway": replacement_gateway},
+            headers=self.api_headers,
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertNotIn(replacement_gateway, updated.get_data(as_text=True))
+        self.assertEqual(updated.get_json()["gateways"][0]["country_code"], "CA")
+        self.assertEqual(updated.get_json()["gateways"][0]["country"], "CA")
 
         selected = self.client.post(
             f"/api/gateways/{first_id}/select",
@@ -437,6 +538,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(selected.status_code, 200)
         self.assertTrue(selected.get_json()["gateways"][0]["active"])
         self.assertFalse(selected.get_json()["gateways"][1]["active"])
+        self.assertIn(replacement_gateway, self.gateway_path.read_text(encoding="utf-8"))
 
         deleted = self.client.delete(
             f"/api/gateways/{first_id}", headers=self.api_headers
@@ -455,6 +557,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(persisted[0]["alias"], "Rayobyte secours")
         self.assertTrue(persisted[0]["active"])
         self.assertFalse(persisted[0]["configured"])
+        self.assertEqual(persisted[0]["country_code"], "")
+        self.assertEqual(persisted[0]["country"], "")
         self.assertFalse(self.gateway_path.exists())
 
         refused = self.client.post(
@@ -476,7 +580,7 @@ class WebUploadTests(unittest.TestCase):
     def test_gateway_credentials_survive_redeployment_with_supabase_vault(self):
         gateway_values = {
             "gateway_persistent": (
-                "sample-user:sample-pass@persistent.proxy.example:8000"
+                "sample-user:sample-pass-country-CA@persistent.proxy.example:8000"
             )
         }
         storage = mock.Mock()
@@ -1303,7 +1407,9 @@ class WebUploadTests(unittest.TestCase):
 
         missing_csrf = self.client.post(
             "/gateway",
-            data={"gateway": "sample-user:sample-pass@proxy.example:8000"},
+            data={
+                "gateway": "sample-user:sample-pass-country-US@proxy.example:8000"
+            },
             headers=self.headers,
             follow_redirects=False,
         )
