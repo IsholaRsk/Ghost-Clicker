@@ -8,7 +8,7 @@ Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il propose trois m
 4. sinon, repère le premier libellé visible exact, mémorise sa position et clique une première fois ;
 5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
 6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
-7. enregistre le numéro de répétition, le proxy utilisé, l’IP de sortie, la chaîne de redirections complète, l’URL finale, le statut et l’erreur éventuelle ;
+7. enregistre le numéro de répétition, la passerelle utilisée (alias), l’IP de sortie, la chaîne de redirections complète, l’URL finale, le statut et l’erreur éventuelle ;
 8. ferme complètement Google Chrome avant la visite suivante.
 
 Il effectue exactement zéro, un ou deux clics selon la cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.

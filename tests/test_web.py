@@ -99,8 +99,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=9"', content)
-        self.assertIn('href="/static/app.css?v=9"', content)
+        self.assertIn('src="/static/app.js?v=10"', content)
+        self.assertIn('href="/static/app.css?v=10"', content)
         self.assertIn('name="theme-color" content="#0b0c0e"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
@@ -131,6 +131,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("Pays requis", javascript)
         self.assertIn("Rotation aléatoire", javascript)
         self.assertIn("IP de sortie et réputation", javascript)
+        self.assertIn("Passerelle", javascript)
+        self.assertIn("proxy_name", javascript)
         self.assertIn("CONTRÔLE D’ENTRÉE", javascript)
         self.assertIn("chaine_redirections", (web.BASE_DIR / "web.py").read_text(encoding="utf-8"))
         self.assertIn(".check-panel", stylesheet)
@@ -1541,6 +1543,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(
             rows[1]["url_finale"], "https://visit-only.example/page"
         )
+        self.assertEqual(rows[0]["passerelle"], "Rayobyte US")
         self.assertEqual(rows[0]["ip_sortie"], "198.51.100.24")
         self.assertEqual(rows[0]["pays_sortie"], "US")
         self.assertEqual(rows[0]["reputation_ip"], "propre")
