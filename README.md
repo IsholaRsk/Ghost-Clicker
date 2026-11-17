@@ -22,7 +22,7 @@ Ghost-Clicker/
 ├── main.py           # moteur Playwright
 ├── web.py            # API Flask, interface web et planification
 ├── database.py       # client de persistance Supabase
-├── frontend/src/     # tableau de bord React sombre
+├── frontend/src/     # tableau de bord React clair et responsive
 ├── static/           # bundle React compilé servi par Flask
 ├── package.json      # dépendances et scripts du tableau de bord
 ├── supabase/
@@ -109,7 +109,7 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface React se présente comme un tableau de bord sombre, sobre et responsive inspiré d’une application financière. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et fixée en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
+Après connexion, l’interface React se présente comme un tableau de bord clair, chaleureux et responsive, avec des cartes crème, des accents vert olive et une navigation inspirée des applications mobiles premium. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et flottante en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
 
 1. ouvrez **Réseau**, ajoutez une ou plusieurs passerelles avec leur pseudo et activez-en exactement une ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
