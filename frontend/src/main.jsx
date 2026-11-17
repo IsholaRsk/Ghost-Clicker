@@ -502,11 +502,13 @@ function Targets({ targets, pending, mutate }) {
   );
 }
 
-function Gateways({ gateways, pending, mutate }) {
+function Gateways({ gateways, run, pending, mutate }) {
   const [editing, setEditing] = useState(null);
   const [alias, setAlias] = useState("");
   const [gateway, setGateway] = useState("");
   const eligible = gateways.filter((item) => item.eligible).length;
+  const checks = run?.gateway_checks || [];
+  const compliantChecks = checks.filter((check) => check.status === "compliant").length;
 
   const openNew = () => { setEditing("new"); setAlias(""); setGateway(""); };
   const openEdit = (item) => { setEditing(item.id); setAlias(item.alias); setGateway(""); };
@@ -525,6 +527,25 @@ function Gateways({ gateways, pending, mutate }) {
       <PageHeading eyebrow="CONNEXION" title="Réseau" description="Pilotez vos passerelles Rayobyte sans jamais afficher leurs identifiants." action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une passerelle</button>} />
       <section className="privacy-banner"><ShieldCheck size={21} /><div><strong>Identifiants protégés · sorties limitées à US, UK et CA</strong><p>Les secrets sont conservés dans Supabase Vault et ne sont jamais renvoyés au navigateur.</p></div></section>
       <section className="rotation-banner" aria-label="Rotation des passerelles"><span className="rotation-icon"><RefreshCw size={18} /></span><div><strong>Rotation aléatoire {eligible ? `sur ${eligible} passerelle${eligible > 1 ? "s" : ""}` : "en attente"}</strong><p>{eligible ? "Chaque visite tire une passerelle éligible au hasard ; inutile d'en choisir une seule." : "Ajoutez au moins une passerelle avec un pays autorisé pour lancer le moteur."}</p></div></section>
+      {checks.length > 0 && (
+        <section className="panel check-panel" aria-label="Contrôle des passerelles">
+          <div className="check-head">
+            <div><span className="eyebrow">CONTRÔLE D’ENTRÉE</span><h2>IP de sortie et réputation</h2><p>Contrôle effectué au début de chaque exécution. Seules les passerelles conformes entrent dans la rotation.</p></div>
+            <span className={`run-pill ${compliantChecks ? "running" : "idle"}`}><span />{compliantChecks}/{checks.length} conformes</span>
+          </div>
+          <div className="check-list">
+            {checks.map((check) => (
+              <div className={`check-row ${check.status}`} key={check.name}>
+                <span className="check-dot" />
+                <strong>{check.name}</strong>
+                <span className="check-id">{check.exit_ip ? `${check.exit_country || "??"} · ${check.exit_ip}` : "IP indisponible"}</span>
+                <span className="check-status">{check.status === "compliant" ? "Conforme" : check.status === "rejected" ? "Refusée" : "Non vérifiée"}</span>
+                {check.error && <small>{check.error}</small>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       <section className="panel resource-panel">
         <div className="resource-head">
           <span>{gateways.length} passerelle{gateways.length > 1 ? "s" : ""}</span>
@@ -623,11 +644,11 @@ function Results({ reports, pending, mutate, setReports, refreshStatus }) {
             action={filter === "all" ? undefined : <button className="secondary-button compact" onClick={() => setFilter("all")}>Tout afficher</button>}
           />
         ) : (
-          <div className="table-scroll"><table><thead><tr><th><span className="sr-only">Sélection</span></th><th>État</th><th>Cible</th><th>Date</th><th>Durée</th><th>Destination</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+          <div className="table-scroll"><table><thead><tr><th><span className="sr-only">Sélection</span></th><th>État</th><th>Cible</th><th>Date</th><th>Durée</th><th>Sortie</th><th>Destination</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
             {results.map((result, index) => {
               const key = visitKey(result);
               const checked = selectedVisits.includes(key);
-              return <tr key={`${key}-${index}`}><td><input type="checkbox" checked={checked} onChange={() => setSelectedVisits((current) => checked ? current.filter((item) => item !== key) : [...current, key])} aria-label={`Sélectionner la visite ${result.visit_number}`} /></td><td><span className={`result-badge ${result.success ? "success" : "failure"}`}>{result.success ? <Check size={13} /> : <X size={13} />}{result.success ? "Réussie" : "Échec"}</span></td><td><strong>{result.target_alias || "—"}</strong><small>{result.initial_url || ""}</small></td><td>{dateTime(result.started_at)}</td><td>{duration(result.duration_ms)}</td><td className="destination-cell">{result.success ? result.final_url || "—" : result.error || "—"}</td><td><button className="icon-button small danger" onClick={() => deleteRun(result.run_id)} aria-label="Supprimer toute cette exécution"><Trash2 size={14} /></button></td></tr>;
+              return <tr key={`${key}-${index}`}><td><input type="checkbox" checked={checked} onChange={() => setSelectedVisits((current) => checked ? current.filter((item) => item !== key) : [...current, key])} aria-label={`Sélectionner la visite ${result.visit_number}`} /></td><td><span className={`result-badge ${result.success ? "success" : "failure"}`}>{result.success ? <Check size={13} /> : <X size={13} />}{result.success ? "Réussie" : "Échec"}</span></td><td><strong>{result.target_alias || "—"}</strong><small>{result.initial_url || ""}</small></td><td>{dateTime(result.started_at)}</td><td>{duration(result.duration_ms)}</td><td className="exit-cell">{result.exit_ip ? `${result.exit_country || "??"} · ${result.exit_ip}` : "—"}</td><td className="destination-cell">{result.success ? ((result.redirect_chain || []).length > 1 ? <details className="chain"><summary>{result.final_url || "—"}</summary><ol>{(result.redirect_chain || []).map((hop, hopIndex) => <li key={`${hop}-${hopIndex}`}>{hop}</li>)}</ol></details> : <span>{result.final_url || "—"}</span>) : result.error || "—"}</td><td><button className="icon-button small danger" onClick={() => deleteRun(result.run_id)} aria-label="Supprimer toute cette exécution"><Trash2 size={14} /></button></td></tr>;
             })}
           </tbody></table></div>
         )}
