@@ -109,7 +109,7 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface React se présente comme un tableau de bord sombre et responsive, avec des surfaces anthracite, des accents vert olive et une navigation inspirée des applications mobiles premium. Les états vides (URLs, passerelles, résultats) sont de vraies cartes d’action, sans débordement horizontal de 320 px à 1440 px. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et flottante en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
+Après connexion, l’interface React se présente comme un tableau de bord sombre et responsive, avec des surfaces anthracite, des accents bleu ciel et une navigation inspirée des applications mobiles premium. Les états vides (URLs, passerelles, résultats) sont de vraies cartes d’action, sans débordement horizontal de 320 px à 1440 px. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et flottante en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
 
 1. ouvrez **Réseau** et ajoutez une ou plusieurs passerelles avec leur pseudo : elles entrent toutes dans la rotation ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
