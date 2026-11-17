@@ -54,6 +54,25 @@ class BrowserSettings:
     redirect_timeout_ms: int
     wait_after_redirect_seconds: float
     delay_between_targets_seconds: float
+    gateways: tuple[ProxyConfig, ...] = ()
+
+    def gateway_pool(self) -> tuple[ProxyConfig, ...]:
+        """Renvoie toutes les passerelles éligibles, sans doublon."""
+
+        pool: list[ProxyConfig] = []
+        seen: set[tuple[str, str, str]] = set()
+        for gateway in (*self.gateways, self.gateway):
+            key = (gateway.server, gateway.username, gateway.password)
+            if key in seen:
+                continue
+            seen.add(key)
+            pool.append(gateway)
+        return tuple(pool)
+
+    def pick_gateway(self) -> ProxyConfig:
+        """Choisit une passerelle au hasard pour une visite."""
+
+        return random.choice(self.gateway_pool())
 
 
 @dataclass(frozen=True)
@@ -422,7 +441,37 @@ def parse_proxy_gateway_text(value: str) -> ProxyConfig:
     return ProxyConfig(alias, server, username, password, country_code)
 
 
-def load_proxy_gateway(path: Path) -> ProxyConfig:
+def split_gateway_blocks(value: str) -> list[list[str]]:
+    """Sépare un fichier de passerelles en blocs séparés par une ligne vide."""
+
+    blocks: list[list[str]] = [[]]
+    for raw_line in value.splitlines():
+        stripped = raw_line.strip()
+        if stripped:
+            blocks[-1].append(stripped)
+        elif blocks[-1]:
+            blocks.append([])
+    return [block for block in blocks if block]
+
+
+def parse_proxy_gateways_text(value: str) -> list[ProxyConfig]:
+    """Lit plusieurs passerelles rotatives séparées par une ligne vide."""
+
+    gateways: list[ProxyConfig] = []
+    seen: set[tuple[str, str, str]] = set()
+    for block in split_gateway_blocks(value):
+        gateway = parse_proxy_gateway_text("\n".join(block))
+        key = (gateway.server, gateway.username, gateway.password)
+        if key in seen:
+            continue
+        seen.add(key)
+        gateways.append(gateway)
+    if not gateways:
+        raise ConfigurationError("Le fichier ne contient aucune passerelle proxy.")
+    return gateways
+
+
+def load_proxy_gateways(path: Path) -> list[ProxyConfig]:
     if not path.exists():
         raise ConfigurationError(
             "Aucune passerelle proxy. Enregistrez-la dans l'interface."
@@ -433,7 +482,13 @@ def load_proxy_gateway(path: Path) -> ProxyConfig:
         raise ConfigurationError(
             "Impossible de lire le fichier de passerelle proxy."
         ) from exc
-    return parse_proxy_gateway_text(content)
+    return parse_proxy_gateways_text(content)
+
+
+def load_proxy_gateway(path: Path) -> ProxyConfig:
+    """Compatibilité : renvoie la première passerelle du fichier."""
+
+    return load_proxy_gateways(path)[0]
 
 
 def validate_button_text(value: str) -> str:
@@ -478,8 +533,11 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
         ) from exc
     load_dotenv(base_dir / ".env", override=False)
 
+    gateways = tuple(load_proxy_gateways(proxy_gateway_path(base_dir)))
+
     return BrowserSettings(
-        gateway=load_proxy_gateway(proxy_gateway_path(base_dir)),
+        gateway=gateways[0],
+        gateways=gateways,
         headless=parse_bool(os.getenv("HEADLESS"), True, "HEADLESS"),
         navigation_timeout_ms=parse_positive_int(
             os.getenv("NAVIGATION_TIMEOUT_MS"), 30_000, "NAVIGATION_TIMEOUT_MS", 1_000
@@ -507,7 +565,8 @@ def redact_error(error: BaseException | str, settings: BrowserSettings) -> str:
     message = str(error).replace("\r", " ").replace("\n", " ").strip()
     secrets = [
         secret
-        for secret in (settings.gateway.username, settings.gateway.password)
+        for gateway in settings.gateway_pool()
+        for secret in (gateway.username, gateway.password)
         if secret
     ]
     for secret in sorted(set(secrets), key=len, reverse=True):
@@ -604,10 +663,11 @@ def open_proxy_context(
     browser: Any,
     settings: BrowserSettings,
     result: VisitResult,
+    gateway: ProxyConfig | None = None,
 ) -> tuple[Any, Any]:
     """Ouvre directement une page via la passerelle, sans requête de contrôle."""
 
-    gateway = settings.gateway
+    gateway = gateway or settings.pick_gateway()
     result.proxy_name = gateway.name
     result.proxy_attempts = 1
     context = browser.new_context(proxy=gateway.playwright_proxy())
@@ -647,7 +707,10 @@ def visit_target(
         browser = playwright.chromium.launch(
             channel="chrome", headless=settings.headless
         )
-        context, page = open_proxy_context(browser, settings, result)
+        # Chaque visite tire une passerelle au hasard parmi les éligibles.
+        context, page = open_proxy_context(
+            browser, settings, result, settings.pick_gateway()
+        )
         install_request_guard(page)
 
         def record_new_page(new_page: Any) -> None:

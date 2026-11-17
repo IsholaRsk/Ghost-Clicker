@@ -85,7 +85,7 @@ class WebUploadTests(unittest.TestCase):
                 Path(web.DEFAULT_PROXY_GATEWAY_FILE),
             )
 
-    def test_home_mounts_the_light_react_dashboard_without_secrets(self):
+    def test_home_mounts_the_dark_react_dashboard_without_secrets(self):
         response = self.client.get("/", headers=self.headers)
         content = response.get_data(as_text=True)
         javascript = (web.BASE_DIR / "static" / "app.js").read_text(
@@ -98,9 +98,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=6"', content)
-        self.assertIn('href="/static/app.css?v=6"', content)
-        self.assertIn('name="theme-color" content="#efebe5"', content)
+        self.assertIn('src="/static/app.js?v=7"', content)
+        self.assertIn('href="/static/app.css?v=7"', content)
+        self.assertIn('name="theme-color" content="#0b0c0e"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
         self.assertNotIn("sample-pass", content)
@@ -128,8 +128,13 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("sorties limitées à US, UK et CA", javascript)
         self.assertIn("-country-GB", javascript)
         self.assertIn("Pays requis", javascript)
-        self.assertIn("color-scheme:light", stylesheet.replace(" ", ""))
-        self.assertIn("--accent:#343d20", stylesheet)
+        self.assertIn("Rotation aléatoire", javascript)
+        self.assertIn("En rotation", javascript)
+        self.assertIn("Aucune URL enregistrée", javascript)
+        self.assertIn("Aucune passerelle enregistrée", javascript)
+        self.assertIn("color-scheme:dark", stylesheet.replace(" ", ""))
+        self.assertIn("--accent:#c3d39a", stylesheet)
+        self.assertIn("--bg:#0b0c0e", stylesheet)
         self.assertIn(".mobile-nav", stylesheet)
         self.assertIn(".country-pill", stylesheet)
         self.assertIn(".url-balance-grid", stylesheet)
@@ -137,6 +142,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertNotIn("linear-gradient", stylesheet)
         self.assertNotIn("radial-gradient", stylesheet)
         self.assertNotIn("--canvas:#f4f4f1", stylesheet)
+        self.assertIn(".empty-state", stylesheet)
+        self.assertIn(".empty-icon", stylesheet)
+        self.assertIn(".rotation-banner", stylesheet)
 
     def test_weekly_earnings_use_contiguous_average_daily_tiers(self):
         expected = {
@@ -358,7 +366,8 @@ class WebUploadTests(unittest.TestCase):
         )
         settings = web.load_app_settings()
         self.assertEqual(settings["gateways"][0]["alias"], "passerelle-rotative")
-        self.assertTrue(settings["gateways"][0]["active"])
+        self.assertNotIn("active", settings["gateways"][0])
+        self.assertTrue(web.gateways_for_api(settings)[0]["eligible"])
         home = self.client.get("/", headers=self.headers)
         self.assertNotIn(line, home.get_data(as_text=True))
 
@@ -404,15 +413,13 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(web.read_gateway_secrets(), {})
         self.assertFalse(self.gateway_path.exists())
 
-    def test_legacy_gateway_without_allowed_country_cannot_be_used_or_selected(self):
+    def test_legacy_gateway_without_allowed_country_is_never_rotated(self):
         legacy_secret = "sample-user:SENSITIVE_PASSWORD@proxy.example:8000"
         gateway_id = "gateway_legacy_countryless"
         web.save_app_settings(
             {
                 **web.DEFAULT_APP_SETTINGS,
-                "gateways": [
-                    {"id": gateway_id, "alias": "Ancienne", "active": True}
-                ],
+                "gateways": [{"id": gateway_id, "alias": "Ancienne"}],
             }
         )
         web.write_gateway_secrets({gateway_id: legacy_secret})
@@ -423,19 +430,10 @@ class WebUploadTests(unittest.TestCase):
         self.assertFalse(state.get_json()["gateway_ready"])
         gateway = state.get_json()["gateways"][0]
         self.assertTrue(gateway["configured"])
+        self.assertFalse(gateway["eligible"])
         self.assertEqual(gateway["country_code"], "")
         self.assertEqual(gateway["country"], "")
         self.assertNotIn("SENSITIVE_PASSWORD", state.get_data(as_text=True))
-        self.assertFalse(self.gateway_path.exists())
-
-        selected = self.client.post(
-            f"/api/gateways/{gateway_id}/select",
-            json={},
-            headers=self.api_headers,
-        )
-        self.assertEqual(selected.status_code, 400)
-        self.assertIn("country-US", selected.get_json()["error"])
-        self.assertNotIn("SENSITIVE_PASSWORD", selected.get_data(as_text=True))
         self.assertFalse(self.gateway_path.exists())
 
     def test_gateway_crud_keeps_secrets_out_of_settings_and_handles_cache_loss(self):
@@ -454,14 +452,13 @@ class WebUploadTests(unittest.TestCase):
             json={
                 "alias": "Rayobyte principale",
                 "gateway": first_gateway,
-                "active": False,
             },
             headers=self.api_headers,
         )
         self.assertEqual(created.status_code, 200)
         self.assertNotIn(first_gateway, created.get_data(as_text=True))
         first = created.get_json()["gateways"][0]
-        self.assertTrue(first["active"])
+        self.assertTrue(first["eligible"])
         self.assertTrue(first["configured"])
         self.assertEqual(first["country_code"], "US")
         self.assertEqual(first["country"], "US")
@@ -496,20 +493,31 @@ class WebUploadTests(unittest.TestCase):
             json={
                 "alias": "Rayobyte secours",
                 "gateway": second_gateway,
-                "active": True,
             },
             headers=self.api_headers,
         )
         gateways = created.get_json()["gateways"]
         first_id = gateways[0]["id"]
         second_id = gateways[1]["id"]
-        self.assertFalse(gateways[0]["active"])
-        self.assertTrue(gateways[1]["active"])
+        # Les deux passerelles restent éligibles : rotation aléatoire.
+        self.assertTrue(gateways[0]["eligible"])
+        self.assertTrue(gateways[1]["eligible"])
         self.assertEqual(gateways[1]["country_code"], "GB")
         self.assertEqual(gateways[1]["country"], "UK")
-        active_text = self.gateway_path.read_text(encoding="utf-8")
-        self.assertIn("# alias: Rayobyte secours", active_text)
-        self.assertIn(second_gateway, active_text)
+        pool_text = self.gateway_path.read_text(encoding="utf-8")
+        self.assertIn("# alias: Rayobyte principale", pool_text)
+        self.assertIn("# alias: Rayobyte secours", pool_text)
+        self.assertIn(first_gateway, pool_text)
+        self.assertIn(second_gateway, pool_text)
+        self.assertEqual(stat.S_IMODE(self.gateway_path.stat().st_mode), 0o600)
+        self.assertEqual(
+            [gateway.name for gateway in main.load_proxy_gateways(
+                self.gateway_path
+            )],
+            ["Rayobyte principale", "Rayobyte secours"],
+        )
+        state = self.client.get("/api/state", headers=self.headers)
+        self.assertTrue(state.get_json()["gateway_ready"])
 
         updated = self.client.patch(
             f"/api/gateways/{first_id}",
@@ -529,16 +537,9 @@ class WebUploadTests(unittest.TestCase):
         self.assertNotIn(replacement_gateway, updated.get_data(as_text=True))
         self.assertEqual(updated.get_json()["gateways"][0]["country_code"], "CA")
         self.assertEqual(updated.get_json()["gateways"][0]["country"], "CA")
-
-        selected = self.client.post(
-            f"/api/gateways/{first_id}/select",
-            json={},
-            headers=self.api_headers,
+        self.assertIn(
+            replacement_gateway, self.gateway_path.read_text(encoding="utf-8")
         )
-        self.assertEqual(selected.status_code, 200)
-        self.assertTrue(selected.get_json()["gateways"][0]["active"])
-        self.assertFalse(selected.get_json()["gateways"][1]["active"])
-        self.assertIn(replacement_gateway, self.gateway_path.read_text(encoding="utf-8"))
 
         deleted = self.client.delete(
             f"/api/gateways/{first_id}", headers=self.api_headers
@@ -546,7 +547,10 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200)
         remaining = deleted.get_json()["gateways"]
         self.assertEqual([item["id"] for item in remaining], [second_id])
-        self.assertTrue(remaining[0]["active"])
+        self.assertTrue(remaining[0]["eligible"])
+        self.assertNotIn(
+            replacement_gateway, self.gateway_path.read_text(encoding="utf-8")
+        )
 
         self.gateway_registry_path.unlink()
         with web.GATEWAY_SECRETS_LOCK:
@@ -555,19 +559,12 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(state.status_code, 200)
         persisted = state.get_json()["gateways"]
         self.assertEqual(persisted[0]["alias"], "Rayobyte secours")
-        self.assertTrue(persisted[0]["active"])
+        self.assertFalse(persisted[0]["eligible"])
         self.assertFalse(persisted[0]["configured"])
         self.assertEqual(persisted[0]["country_code"], "")
         self.assertEqual(persisted[0]["country"], "")
+        self.assertFalse(state.get_json()["gateway_ready"])
         self.assertFalse(self.gateway_path.exists())
-
-        refused = self.client.post(
-            f"/api/gateways/{second_id}/select",
-            json={},
-            headers=self.api_headers,
-        )
-        self.assertEqual(refused.status_code, 400)
-        self.assertIn("Ressaisissez", refused.get_json()["error"])
 
         deleted = self.client.delete(
             f"/api/gateways/{second_id}", headers=self.api_headers
@@ -576,6 +573,63 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(deleted.get_json()["gateways"], [])
         self.assertEqual(web.load_app_settings()["gateways"], [])
         self.assertFalse(self.gateway_path.exists())
+
+    def test_rotation_pool_exposes_every_valid_gateway_to_the_engine(self):
+        values = (
+            ("Rayobyte US", "user-a:pass-a-country-US@proxy-a.example:8000"),
+            ("Rayobyte UK", "user-b:pass-b-country-GB@proxy-b.example:8001"),
+            ("Rayobyte CA", "user-c:pass-c-country-CA@proxy-c.example:8002"),
+        )
+        for alias, value in values:
+            response = self.client.post(
+                "/api/gateways",
+                json={"alias": alias, "gateway": value},
+                headers=self.api_headers,
+            )
+            self.assertEqual(response.status_code, 200)
+
+        state = self.client.get("/api/state", headers=self.headers)
+        payload = state.get_json()
+
+        self.assertTrue(payload["gateway_ready"])
+        self.assertEqual(
+            [item["eligible"] for item in payload["gateways"]], [True, True, True]
+        )
+        self.assertEqual(
+            [item["country"] for item in payload["gateways"]], ["US", "UK", "CA"]
+        )
+        for _, value in values:
+            self.assertNotIn(value, state.get_data(as_text=True))
+
+        pool = main.load_proxy_gateways(self.gateway_path)
+        self.assertEqual(
+            [gateway.name for gateway in pool],
+            ["Rayobyte US", "Rayobyte UK", "Rayobyte CA"],
+        )
+        self.assertEqual(
+            sorted(gateway.country_code for gateway in pool), ["CA", "GB", "US"]
+        )
+        self.assertEqual(stat.S_IMODE(self.gateway_path.stat().st_mode), 0o600)
+
+    def test_rotation_rejects_the_removed_single_gateway_selection_route(self):
+        gateway_id = "gateway_selection_removed"
+        web.save_app_settings(
+            {
+                **web.DEFAULT_APP_SETTINGS,
+                "gateways": [{"id": gateway_id, "alias": "Unique"}],
+            }
+        )
+        web.write_gateway_secrets(
+            {gateway_id: "sample-user:sample-pass-country-US@proxy.example:8000"}
+        )
+
+        response = self.client.post(
+            f"/api/gateways/{gateway_id}/select",
+            json={},
+            headers=self.api_headers,
+        )
+
+        self.assertEqual(response.status_code, 404)
 
     def test_gateway_credentials_survive_redeployment_with_supabase_vault(self):
         gateway_values = {
@@ -903,7 +957,7 @@ class WebUploadTests(unittest.TestCase):
         campaign = {"total_executions": 23}
         with (
             mock.patch("web.load_app_settings", return_value=settings),
-            mock.patch("web.sync_active_gateway", return_value=True),
+            mock.patch("web.sync_gateway_pool", return_value=True),
             mock.patch("web.load_browser_settings", return_value=object()),
             mock.patch(
                 "web.targets_from_settings",

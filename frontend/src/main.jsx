@@ -351,7 +351,16 @@ function Dashboard({ run, targets, reports, settings, pending, mutate, refreshSt
           <div className="url-balance-grid">
             {weekly.cards.map((card) => <UrlBalanceCard card={card} key={card.target_id} />)}
           </div>
-        ) : <div className="panel"><EmptyState icon={WalletCards} text="Ajoutez une URL pour commencer à suivre sa rémunération." /></div>}
+        ) : (
+          <div className="panel">
+            <EmptyState
+              icon={WalletCards}
+              title="Aucune rémunération à afficher"
+              text="Ajoutez une URL pour suivre ses clics et son solde projeté."
+              action={<button className="secondary-button compact" onClick={() => goTo("targets")}>Ajouter une URL</button>}
+            />
+          </div>
+        )}
       </section>
 
       <section className="content-grid">
@@ -415,8 +424,15 @@ function VisitList({ results, empty }) {
   );
 }
 
-function EmptyState({ icon: Icon, text }) {
-  return <div className="empty-state"><Icon size={25} /><p>{text}</p></div>;
+function EmptyState({ icon: Icon, title, text, action }) {
+  return (
+    <div className="empty-state">
+      <span className="empty-icon"><Icon size={24} /></span>
+      {title && <strong>{title}</strong>}
+      <p>{text}</p>
+      {action && <div className="empty-action">{action}</div>}
+    </div>
+  );
 }
 
 function Targets({ targets, pending, mutate }) {
@@ -439,8 +455,24 @@ function Targets({ targets, pending, mutate }) {
     <div className="page">
       <PageHeading eyebrow="DESTINATIONS" title="URLs" description="Gérez les pages visitées et les boutons à déclencher." action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une URL</button>} />
       <section className="panel resource-panel">
-        <div className="resource-head"><span>{targets.length} URL{targets.length > 1 ? "s" : ""}</span><div className="resource-tools"><small>Modifications possibles lorsque le moteur est arrêté.</small><button type="button" disabled={pending || !targets.length} onClick={() => mutate("/api/targets/selection", { method: "POST", body: { mode: "all" } })}>Tout sélectionner</button><button type="button" disabled={pending || !targets.length} onClick={() => mutate("/api/targets/selection", { method: "POST", body: { mode: "none" } })}>Tout désélectionner</button></div></div>
-        {!targets.length ? <EmptyState icon={Globe2} text="Ajoutez votre première URL pour commencer." /> : (
+        <div className="resource-head">
+          <span>{targets.length} URL{targets.length > 1 ? "s" : ""}</span>
+          {targets.length > 0 && (
+            <div className="resource-tools">
+              <small>Modifications possibles lorsque le moteur est arrêté.</small>
+              <button type="button" disabled={pending} onClick={() => mutate("/api/targets/selection", { method: "POST", body: { mode: "all" } })}>Tout sélectionner</button>
+              <button type="button" disabled={pending} onClick={() => mutate("/api/targets/selection", { method: "POST", body: { mode: "none" } })}>Tout désélectionner</button>
+            </div>
+          )}
+        </div>
+        {!targets.length ? (
+          <EmptyState
+            icon={Globe2}
+            title="Aucune URL enregistrée"
+            text="Ajoutez la première page à visiter : le reste se configure automatiquement."
+            action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une URL</button>}
+          />
+        ) : (
           <div className="resource-list">
             {targets.map((target) => (
               <article className="resource-row" key={target.id}>
@@ -474,14 +506,14 @@ function Gateways({ gateways, pending, mutate }) {
   const [editing, setEditing] = useState(null);
   const [alias, setAlias] = useState("");
   const [gateway, setGateway] = useState("");
-  const [active, setActive] = useState(false);
+  const eligible = gateways.filter((item) => item.eligible).length;
 
-  const openNew = () => { setEditing("new"); setAlias(""); setGateway(""); setActive(!gateways.length); };
-  const openEdit = (item) => { setEditing(item.id); setAlias(item.alias); setGateway(""); setActive(item.active); };
+  const openNew = () => { setEditing("new"); setAlias(""); setGateway(""); };
+  const openEdit = (item) => { setEditing(item.id); setAlias(item.alias); setGateway(""); };
   const close = () => setEditing(null);
   const submit = async (event) => {
     event.preventDefault();
-    const body = editing === "new" ? { alias, gateway, active } : { alias, ...(gateway ? { gateway } : {}) };
+    const body = editing === "new" ? { alias, gateway } : { alias, ...(gateway ? { gateway } : {}) };
     const result = editing === "new"
       ? await mutate("/api/gateways", { method: "POST", body })
       : await mutate(`/api/gateways/${editing}`, { method: "PATCH", body });
@@ -492,16 +524,27 @@ function Gateways({ gateways, pending, mutate }) {
     <div className="page">
       <PageHeading eyebrow="CONNEXION" title="Réseau" description="Pilotez vos passerelles Rayobyte sans jamais afficher leurs identifiants." action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une passerelle</button>} />
       <section className="privacy-banner"><ShieldCheck size={21} /><div><strong>Identifiants protégés · sorties limitées à US, UK et CA</strong><p>Les secrets sont conservés dans Supabase Vault et ne sont jamais renvoyés au navigateur.</p></div></section>
+      <section className="rotation-banner" aria-label="Rotation des passerelles"><span className="rotation-icon"><RefreshCw size={18} /></span><div><strong>Rotation aléatoire {eligible ? `sur ${eligible} passerelle${eligible > 1 ? "s" : ""}` : "en attente"}</strong><p>{eligible ? "Chaque visite tire une passerelle éligible au hasard ; inutile d'en choisir une seule." : "Ajoutez au moins une passerelle avec un pays autorisé pour lancer le moteur."}</p></div></section>
       <section className="panel resource-panel">
-        {!gateways.length ? <EmptyState icon={ServerCog} text="Ajoutez une passerelle pour permettre les visites via Rayobyte." /> : (
+        <div className="resource-head">
+          <span>{gateways.length} passerelle{gateways.length > 1 ? "s" : ""}</span>
+          <div className="resource-tools"><small>Toutes les passerelles valides sont utilisées automatiquement.</small></div>
+        </div>
+        {!gateways.length ? (
+          <EmptyState
+            icon={ServerCog}
+            title="Aucune passerelle enregistrée"
+            text="Ajoutez une passerelle Rayobyte pour permettre les visites."
+            action={<button className="primary-button" onClick={openNew}><Plus size={17} /> Ajouter une passerelle</button>}
+          />
+        ) : (
           <div className="resource-list">
             {gateways.map((item) => (
               <article className="resource-row gateway-row" key={item.id}>
-                <span className={`resource-icon ${item.active ? "active" : ""}`}><ServerCog size={20} /></span>
-                <div className="resource-copy"><strong>{item.alias}</strong><span>{item.configured ? "Identifiants enregistrés" : "Identifiants à ressaisir"}</span></div>
+                <span className={`resource-icon ${item.eligible ? "active" : ""}`}><ServerCog size={20} /></span>
+                <div className="resource-copy"><strong>{item.alias}</strong><span>{item.configured ? (item.eligible ? "Utilisée en rotation" : "Pays non autorisé") : "Identifiants à ressaisir"}</span></div>
                 <span className={`country-pill ${item.country ? "" : "invalid"}`}>{item.country ? `Sortie ${item.country}` : "Pays requis"}</span>
-                <span className={`run-pill ${item.active ? "running" : "idle"}`}><span />{item.active ? "Active" : "En veille"}</span>
-                {!item.active && <button className="secondary-button compact" onClick={() => mutate(`/api/gateways/${item.id}/select`, { method: "POST" })}>Activer</button>}
+                <span className={`run-pill ${item.eligible ? "running" : "idle"}`}><span />{item.eligible ? "En rotation" : "En attente"}</span>
                 <button className="icon-button small" onClick={() => openEdit(item)} aria-label={`Modifier ${item.alias}`}><Pencil size={16} /></button>
                 <button className="icon-button small danger" onClick={() => window.confirm(`Supprimer « ${item.alias} » ?`) && mutate(`/api/gateways/${item.id}`, { method: "DELETE" })} aria-label={`Supprimer ${item.alias}`}><Trash2 size={16} /></button>
               </article>
@@ -514,8 +557,7 @@ function Gateways({ gateways, pending, mutate }) {
           <form className="form-grid" onSubmit={submit}>
             <Field label="Alias" value={alias} onChange={setAlias} placeholder="Rayobyte US" required />
             <Field label={editing === "new" ? "Passerelle ou commande curl" : "Nouveaux identifiants (optionnel)"} value={gateway} onChange={setGateway} placeholder="curl https://rayobyte.com/ -x utilisateur:mot-de-passe-country-US@hôte:port" type="password" required={editing === "new"} autoComplete="new-password" />
-            <p className="field-help">Collez la valeur brute ou la commande <code>curl … -x …</code> fournie par Rayobyte. Le mot de passe doit finir par <code>-country-US</code>, <code>-country-GB</code> (UK) ou <code>-country-CA</code>. Tout autre pays est refusé.</p>
-            {editing === "new" && <label className="check-row"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Définir comme passerelle active</label>}
+            <p className="field-help">Collez la valeur brute ou la commande <code>curl … -x …</code> fournie par Rayobyte. Le mot de passe doit finir par <code>-country-US</code>, <code>-country-GB</code> (UK) ou <code>-country-CA</code>. Tout autre pays est refusé. Toutes les passerelles valides tournent automatiquement.</p>
             <div className="modal-actions"><button type="button" className="secondary-button" onClick={close}>Annuler</button><button className="primary-button" disabled={pending}><Save size={16} /> Enregistrer</button></div>
           </form>
         </Modal>
@@ -573,7 +615,14 @@ function Results({ reports, pending, mutate, setReports, refreshStatus }) {
           </div>
         </div>
         {emptyRuns.length > 0 && <div className="empty-runs"><span>{emptyRuns.length} exécution{emptyRuns.length > 1 ? "s" : ""} sans visite</span>{emptyRuns.map((report) => <button key={report.run_id} onClick={() => deleteRun(report.run_id)}><Trash2 size={12} /> {dateTime(report.started_at)}</button>)}</div>}
-        {!results.length ? <EmptyState icon={BarChart3} text="Aucun résultat ne correspond à ce filtre." /> : (
+        {!results.length ? (
+          <EmptyState
+            icon={BarChart3}
+            title={filter === "all" ? "Aucune visite enregistrée" : "Aucun résultat pour ce filtre"}
+            text={filter === "all" ? "Lancez une exécution pour voir les visites conservées ici." : "Changez de filtre pour afficher les autres visites."}
+            action={filter === "all" ? undefined : <button className="secondary-button compact" onClick={() => setFilter("all")}>Tout afficher</button>}
+          />
+        ) : (
           <div className="table-scroll"><table><thead><tr><th><span className="sr-only">Sélection</span></th><th>État</th><th>Cible</th><th>Date</th><th>Durée</th><th>Destination</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
             {results.map((result, index) => {
               const key = visitKey(result);
