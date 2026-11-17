@@ -172,6 +172,88 @@ class ProxyGatewayFileTests(unittest.TestCase):
         self.assertEqual(gateway.password, "sample-pass-gateway-country-US")
         self.assertEqual(gateway.country_code, "US")
 
+    def test_parses_several_gateway_blocks_for_random_rotation(self):
+        content = (
+            f"# alias: Rayobyte US\n{self.gateway_line('us', 8000, 'US')}\n\n"
+            f"# alias: Rayobyte UK\n{self.gateway_line('uk', 8001, 'GB')}\n\n"
+            f"# alias: Rayobyte CA\n{self.gateway_line('ca', 8002, 'CA')}\n"
+        )
+        gateways = main.parse_proxy_gateways_text(content)
+
+        self.assertEqual(
+            [gateway.name for gateway in gateways],
+            ["Rayobyte US", "Rayobyte UK", "Rayobyte CA"],
+        )
+        self.assertEqual(
+            [gateway.country_code for gateway in gateways], ["US", "GB", "CA"]
+        )
+        self.assertEqual(
+            [gateway.server for gateway in gateways],
+            [
+                "http://proxy-us.example:8000",
+                "http://proxy-uk.example:8001",
+                "http://proxy-ca.example:8002",
+            ],
+        )
+
+    def test_duplicate_gateway_blocks_are_rotated_once(self):
+        line = self.gateway_line()
+        gateways = main.parse_proxy_gateways_text(f"{line}\n\n{line}\n")
+
+        self.assertEqual(len(gateways), 1)
+
+    def test_settings_pick_a_random_gateway_from_every_eligible_one(self):
+        first = main.ProxyConfig(
+            "Rayobyte US", "http://proxy-us.example:8000", "u-a", "p-a-country-US"
+        )
+        second = main.ProxyConfig(
+            "Rayobyte UK", "http://proxy-uk.example:8001", "u-b", "p-b-country-GB"
+        )
+        settings = main.BrowserSettings(
+            gateway=first,
+            headless=True,
+            navigation_timeout_ms=30_000,
+            click_timeout_ms=15_000,
+            redirect_timeout_ms=30_000,
+            wait_after_redirect_seconds=0,
+            delay_between_targets_seconds=0,
+            gateways=(first, second),
+        )
+
+        self.assertEqual(settings.gateway_pool(), (first, second))
+        with mock.patch("main.random.choice", side_effect=[second, first]) as choose:
+            self.assertEqual(settings.pick_gateway(), second)
+            self.assertEqual(settings.pick_gateway(), first)
+        choose.assert_called_with((first, second))
+
+    def test_redaction_covers_every_gateway_in_the_rotation(self):
+        first = main.ProxyConfig(
+            "Rayobyte US", "http://proxy-us.example:8000", "user-one", "pass-one-country-US"
+        )
+        second = main.ProxyConfig(
+            "Rayobyte UK", "http://proxy-uk.example:8001", "user-two", "pass-two-country-GB"
+        )
+        settings = main.BrowserSettings(
+            gateway=first,
+            headless=True,
+            navigation_timeout_ms=30_000,
+            click_timeout_ms=15_000,
+            redirect_timeout_ms=30_000,
+            wait_after_redirect_seconds=0,
+            delay_between_targets_seconds=0,
+            gateways=(first, second),
+        )
+
+        message = main.redact_error(
+            RuntimeError("échec user-one pass-one-country-US user-two pass-two-country-GB"),
+            settings,
+        )
+
+        self.assertNotIn("user-one", message)
+        self.assertNotIn("pass-one-country-US", message)
+        self.assertNotIn("user-two", message)
+        self.assertNotIn("pass-two-country-GB", message)
+
     def test_parses_each_allowed_rayobyte_country_suffix(self):
         for country_code in ("US", "GB", "CA"):
             with self.subTest(country_code=country_code):

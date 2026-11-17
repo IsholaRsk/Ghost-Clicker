@@ -33,6 +33,7 @@ from main import (
     Target,
     load_browser_settings,
     parse_proxy_gateway_text,
+    parse_proxy_gateways_text,
     resolve_repetition_count,
     run_targets,
     validate_button_configuration,
@@ -407,10 +408,12 @@ def normalize_target_records(value: Any) -> list[dict[str, Any]]:
 
 
 def normalize_gateway_records(value: Any) -> list[dict[str, Any]]:
+    """Normalise le registre ; toutes les passerelles valides sont éligibles."""
+
     if not isinstance(value, list):
         return []
     normalized: list[dict[str, Any]] = []
-    active_seen = False
+    seen_ids: set[str] = set()
     for position, raw_item in enumerate(value[:MAX_GATEWAYS], start=1):
         if not isinstance(raw_item, dict):
             continue
@@ -420,20 +423,18 @@ def normalize_gateway_records(value: Any) -> list[dict[str, Any]]:
             source = f"{position}\x1f{item.get('alias', '')}"
             digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:20]
             identifier = f"gateway_{digest}"
+        if identifier in seen_ids:
+            continue
+        seen_ids.add(identifier)
         alias = " ".join(str(item.get("alias", "")).strip().split())
         if not alias:
             alias = f"Passerelle {position}"
-        active = bool(item.get("active", False)) and not active_seen
-        active_seen = active_seen or active
         normalized.append(
             {
                 "id": identifier,
                 "alias": alias[:MAX_TARGET_ALIAS_LENGTH],
-                "active": active,
             }
         )
-    if normalized and not active_seen:
-        normalized[0]["active"] = True
     return normalized
 
 
@@ -450,25 +451,72 @@ def validate_gateway_alias(value: str) -> str:
     return alias
 
 
+def gateway_pool_entries(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Toutes les passerelles enregistrées et valides, sans exposer le secret."""
+
+    secrets_by_id = read_gateway_secrets()
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for gateway in settings.get("gateways", []):
+        if not isinstance(gateway, dict):
+            continue
+        identifier = str(gateway.get("id", ""))
+        secret = secrets_by_id.get(identifier)
+        if not secret:
+            continue
+        try:
+            parsed = parse_proxy_gateway_text(secret)
+        except ConfigurationError:
+            continue
+        key = (parsed.server, parsed.username, parsed.password)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            {
+                "id": identifier,
+                "alias": gateway.get("alias") or parsed.name,
+                "country_code": parsed.country_code,
+                "secret": secret.strip(),
+                "gateway": parsed,
+            }
+        )
+    return entries
+
+
+def public_gateway_record(entry: dict[str, Any]) -> dict[str, Any]:
+    country_code = str(entry.get("country_code", ""))
+    return {
+        "id": entry["id"],
+        "alias": entry["alias"],
+        "configured": True,
+        "eligible": True,
+        "country_code": country_code,
+        "country": "UK" if country_code == "GB" else country_code,
+    }
+
+
 def gateways_for_api(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    eligible = {
+        str(entry["id"]): entry for entry in gateway_pool_entries(settings)
+    }
     secrets_by_id = read_gateway_secrets()
     values: list[dict[str, Any]] = []
     for gateway in settings.get("gateways", []):
         if not isinstance(gateway, dict):
             continue
-        secret = secrets_by_id.get(str(gateway.get("id", "")))
-        country_code = ""
-        if secret:
-            try:
-                country_code = parse_proxy_gateway_text(secret).country_code
-            except ConfigurationError:
-                pass
+        identifier = str(gateway.get("id", ""))
+        if identifier in eligible:
+            values.append(public_gateway_record(eligible[identifier]))
+            continue
         values.append(
             {
-                **gateway,
-                "configured": bool(secret),
-                "country_code": country_code,
-                "country": "UK" if country_code == "GB" else country_code,
+                "id": identifier,
+                "alias": gateway.get("alias", ""),
+                "configured": bool(secrets_by_id.get(identifier)),
+                "eligible": False,
+                "country_code": "",
+                "country": "",
             }
         )
     return values
@@ -487,34 +535,28 @@ def migrate_legacy_gateway(settings: dict[str, Any]) -> None:
         raise ConfigurationError(
             "Impossible de lire l'ancienne passerelle éphémère."
         ) from exc
-    parsed = parse_proxy_gateway_text(content)
-    identifier = "gateway_legacy"
-    settings["gateways"] = [
-        {"id": identifier, "alias": parsed.name, "active": True}
-    ]
+    settings["gateways"] = []
     secrets_by_id = read_gateway_secrets()
-    secrets_by_id[identifier] = content.strip()
+    for position, parsed in enumerate(parse_proxy_gateways_text(content), start=1):
+        identifier = "gateway_legacy" if position == 1 else f"gateway_legacy_{position}"
+        settings["gateways"].append(
+            {"id": identifier, "alias": parsed.name}
+        )
+        secrets_by_id[identifier] = (
+            f"{parsed.username}:{parsed.password}"
+            f"@{urlsplit(parsed.server).netloc}"
+        )
     write_gateway_secrets(secrets_by_id)
     save_app_settings(settings)
 
 
-def sync_active_gateway(settings: dict[str, Any]) -> bool:
+def sync_gateway_pool(settings: dict[str, Any]) -> bool:
+    """Écrit le pool de passerelles éligibles, utilisé en rotation aléatoire."""
+
     migrate_legacy_gateway(settings)
-    gateways = settings.get("gateways", [])
-    if not isinstance(gateways, list) or not gateways:
-        return False
-    active = next(
-        (
-            item
-            for item in gateways
-            if isinstance(item, dict) and item.get("active")
-        ),
-        None,
-    )
-    secrets_by_id = read_gateway_secrets()
-    secret = secrets_by_id.get(str(active.get("id", ""))) if active else None
+    entries = gateway_pool_entries(settings)
     path = proxy_gateway_file_path()
-    if active is None or not secret:
+    if not entries:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -522,18 +564,12 @@ def sync_active_gateway(settings: dict[str, Any]) -> bool:
                 "Impossible de désactiver la passerelle éphémère."
             ) from exc
         return False
-    alias = validate_gateway_alias(str(active.get("alias", "")))
-    try:
-        parse_proxy_gateway_text(secret)
-    except ConfigurationError:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise ConfigurationError(
-                "Impossible de désactiver la passerelle non conforme."
-            ) from exc
-        return False
-    atomic_write_private_text(path, f"# alias: {alias}\n{secret.strip()}\n")
+    blocks = [
+        f"# alias: {validate_gateway_alias(str(entry['alias']))}\n"
+        f"{entry['secret']}"
+        for entry in entries
+    ]
+    atomic_write_private_text(path, "\n\n".join(blocks) + "\n")
     return True
 
 
@@ -1411,7 +1447,7 @@ def read_browser_configuration(
     app_settings: dict[str, Any] | None = None,
 ) -> tuple[BrowserSettings | None, str]:
     try:
-        sync_active_gateway(app_settings or load_app_settings())
+        sync_gateway_pool(app_settings or load_app_settings())
         return load_browser_settings(BASE_DIR), ""
     except (ConfigurationError, OSError) as exc:
         return None, str(exc)
@@ -1425,7 +1461,7 @@ def execute_job(
     run_id = ""
     try:
         app_settings = load_app_settings()
-        sync_active_gateway(app_settings)
+        sync_gateway_pool(app_settings)
         browser_settings = load_browser_settings(BASE_DIR)
         targets = targets_from_settings(app_settings)
         if not targets:
@@ -1856,7 +1892,7 @@ def api_snapshot(*, include_targets: bool = True) -> dict[str, Any]:
     if settings is not None:
         settings = initialize_lifetime_metrics(settings, stored_reports)
     reports = reports_for_api(stored_reports)
-    gateway_ready = sync_active_gateway(settings) if settings is not None else False
+    gateway_ready = sync_gateway_pool(settings) if settings is not None else False
     with STATE_LOCK:
         state = dict(RUN_STATE)
     with DATABASE_LOCK:
@@ -1897,7 +1933,7 @@ def api_status() -> Response:
 @APP.get("/api/gateways")
 def api_list_gateways() -> Response:
     settings = load_app_settings()
-    sync_active_gateway(settings)
+    sync_gateway_pool(settings)
     return jsonify({"ok": True, "gateways": gateways_for_api(settings)})
 
 
@@ -1914,40 +1950,32 @@ def api_add_gateway() -> tuple[Response, int] | Response:
         if len(content) > 4_096:
             raise ConfigurationError("La passerelle proxy est trop longue.")
         parse_proxy_gateway_text(content)
-        requested_active = payload.get("active", False)
-        if not isinstance(requested_active, bool):
-            raise ConfigurationError("L'état actif de la passerelle est invalide.")
 
         settings = load_app_settings()
         gateways = list(settings.get("gateways", []))
         if len(gateways) >= MAX_GATEWAYS:
             raise ConfigurationError(f"Maximum : {MAX_GATEWAYS} passerelles.")
         identifier = f"gateway_{secrets.token_urlsafe(12)}"
-        make_active = requested_active or not gateways
-        if make_active:
-            gateways = [{**item, "active": False} for item in gateways]
-        gateway = {"id": identifier, "alias": alias, "active": make_active}
-        gateways.append(gateway)
+        gateways.append({"id": identifier, "alias": alias})
         settings["gateways"] = gateways
         save_app_settings(settings)
 
         secrets_by_id = read_gateway_secrets()
         secrets_by_id[identifier] = content
         write_gateway_secrets(secrets_by_id)
-        sync_active_gateway(settings)
+        sync_gateway_pool(settings)
         record_database_event(
             "gateway_created",
             {
                 "gateway_id": identifier,
                 "alias": alias,
-                "active": make_active,
                 "updated_at": now_iso(),
             },
         )
         return jsonify(
             {
                 "ok": True,
-                "message": "Passerelle ajoutée.",
+                "message": "Passerelle ajoutée à la rotation.",
                 "gateways": gateways_for_api(settings),
             }
         )
@@ -1988,7 +2016,7 @@ def api_update_gateway(gateway_id: str) -> tuple[Response, int] | Response:
             secrets_by_id = read_gateway_secrets()
             secrets_by_id[gateway_id] = content
             write_gateway_secrets(secrets_by_id)
-        sync_active_gateway(settings)
+        sync_gateway_pool(settings)
         record_database_event(
             "gateway_updated",
             {"gateway_id": gateway_id, "updated_at": now_iso()},
@@ -1997,47 +2025,6 @@ def api_update_gateway(gateway_id: str) -> tuple[Response, int] | Response:
             {
                 "ok": True,
                 "message": "Passerelle modifiée.",
-                "gateways": gateways_for_api(settings),
-            }
-        )
-    except ConfigurationError as exc:
-        return api_error(
-            exc, 404 if str(exc) == "Passerelle introuvable." else 400
-        )
-
-
-@APP.post("/api/gateways/<gateway_id>/select")
-def api_select_gateway(gateway_id: str) -> tuple[Response, int] | Response:
-    try:
-        require_csrf()
-        require_idle_configuration()
-        if not SAFE_IDENTIFIER_PATTERN.fullmatch(gateway_id):
-            raise ConfigurationError("Identifiant de passerelle invalide.")
-        secrets_by_id = read_gateway_secrets()
-        if gateway_id not in secrets_by_id:
-            raise ConfigurationError(
-                "Ressaisissez les identifiants avant d'activer cette passerelle."
-            )
-        parse_proxy_gateway_text(secrets_by_id[gateway_id])
-        settings = load_app_settings()
-        gateways = list(settings.get("gateways", []))
-        if not any(item.get("id") == gateway_id for item in gateways):
-            raise ConfigurationError("Passerelle introuvable.")
-        gateways = [
-            {**item, "active": item.get("id") == gateway_id}
-            for item in gateways
-        ]
-        settings["gateways"] = gateways
-        save_app_settings(settings)
-        sync_active_gateway(settings)
-        record_database_event(
-            "gateway_selected",
-            {"gateway_id": gateway_id, "updated_at": now_iso()},
-        )
-        return jsonify(
-            {
-                "ok": True,
-                "message": "Passerelle active mise à jour.",
                 "gateways": gateways_for_api(settings),
             }
         )
@@ -2061,19 +2048,6 @@ def api_delete_gateway(gateway_id: str) -> tuple[Response, int] | Response:
             raise ConfigurationError("Passerelle introuvable.")
         secrets_by_id = read_gateway_secrets()
         secrets_by_id.pop(gateway_id, None)
-        if retained and not any(item.get("active") for item in retained):
-            configured_id = next(
-                (
-                    str(item.get("id"))
-                    for item in retained
-                    if str(item.get("id")) in secrets_by_id
-                ),
-                str(retained[0].get("id")),
-            )
-            retained = [
-                {**item, "active": str(item.get("id")) == configured_id}
-                for item in retained
-            ]
         settings["gateways"] = retained
         if not retained:
             try:
@@ -2084,7 +2058,7 @@ def api_delete_gateway(gateway_id: str) -> tuple[Response, int] | Response:
                 ) from exc
         save_app_settings(settings)
         write_gateway_secrets(secrets_by_id)
-        sync_active_gateway(settings)
+        sync_gateway_pool(settings)
         record_database_event(
             "gateway_deleted",
             {"gateway_id": gateway_id, "updated_at": now_iso()},
@@ -2115,15 +2089,17 @@ def api_save_gateway() -> tuple[Response, int] | Response:
         parse_proxy_gateway_text(content)
         settings = load_app_settings()
         gateways = list(settings.get("gateways", []))
-        active = next((item for item in gateways if item.get("active")), None)
-        if active is None:
-            atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
-            sync_active_gateway(settings)
+        secrets_by_id = read_gateway_secrets()
+        if gateways:
+            identifier = str(gateways[0].get("id", ""))
         else:
-            secrets_by_id = read_gateway_secrets()
-            secrets_by_id[str(active["id"])] = content
-            write_gateway_secrets(secrets_by_id)
-            sync_active_gateway(settings)
+            identifier = f"gateway_{secrets.token_urlsafe(12)}"
+            gateways = [{"id": identifier, "alias": "Passerelle 1"}]
+            settings["gateways"] = gateways
+        secrets_by_id[identifier] = content
+        write_gateway_secrets(secrets_by_id)
+        save_app_settings(settings)
+        sync_gateway_pool(settings)
         record_database_event(
             "gateway_updated", {"configured": True, "updated_at": now_iso()}
         )
@@ -2383,7 +2359,7 @@ def api_run_now() -> tuple[Response, int] | Response:
     try:
         require_csrf()
         app_settings = load_app_settings()
-        sync_active_gateway(app_settings)
+        sync_gateway_pool(app_settings)
         load_browser_settings(BASE_DIR)
         targets = targets_from_settings(app_settings)
         if not targets:
@@ -2525,15 +2501,15 @@ def save_gateway() -> Response:
         parse_proxy_gateway_text(content)
         settings = load_app_settings()
         gateways = list(settings.get("gateways", []))
-        active = next((item for item in gateways if item.get("active")), None)
-        if active is None:
+        if not gateways:
             atomic_write_private_text(proxy_gateway_file_path(), f"{content}\n")
-            sync_active_gateway(settings)
+            sync_gateway_pool(settings)
         else:
             secrets_by_id = read_gateway_secrets()
-            secrets_by_id[str(active["id"])] = content
+            secrets_by_id[str(gateways[0].get("id", ""))] = content
             write_gateway_secrets(secrets_by_id)
-            sync_active_gateway(settings)
+            save_app_settings(settings)
+            sync_gateway_pool(settings)
         record_database_event(
             "gateway_updated",
             {"configured": True, "updated_at": now_iso()},
@@ -2681,7 +2657,7 @@ def run_now() -> Response:
     try:
         require_csrf()
         app_settings = load_app_settings()
-        sync_active_gateway(app_settings)
+        sync_gateway_pool(app_settings)
         load_browser_settings(BASE_DIR)
         targets = targets_from_settings(app_settings)
         if not targets:
@@ -2843,14 +2819,14 @@ def home() -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#efebe5">
+<meta name="theme-color" content="#0b0c0e">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=6">
+<link rel="stylesheet" href="/static/app.css?v=7">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=6" defer></script>
+<script src="/static/app.js?v=7" defer></script>
 </body>
 </html>"""
 

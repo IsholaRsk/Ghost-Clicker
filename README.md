@@ -22,7 +22,7 @@ Ghost-Clicker/
 ├── main.py           # moteur Playwright
 ├── web.py            # API Flask, interface web et planification
 ├── database.py       # client de persistance Supabase
-├── frontend/src/     # tableau de bord React clair et responsive
+├── frontend/src/     # tableau de bord React sombre et responsive
 ├── static/           # bundle React compilé servi par Flask
 ├── package.json      # dépendances et scripts du tableau de bord
 ├── supabase/
@@ -80,9 +80,9 @@ ou comme commande `curl` complète fournie par Rayobyte :
 curl https://rayobyte.com/ -x username:password-country-US@us-east.gw.rayobyte.com:8000
 ```
 
-Les options `-x`, `-xVALEUR`, `--proxy` et `--proxy=VALEUR` sont reconnues sans jamais exécuter la commande. Chaque passerelle conserve un pays fixe et doit obligatoirement terminer son mot de passe de routage par `-country-US`, `-country-GB` pour le Royaume-Uni, ou `-country-CA`. Toute passerelle sans pays, ou avec un autre pays, est refusée avant son enregistrement et ne peut pas être activée. Cette contrainte force le routage demandé à Rayobyte sans effectuer de requête de vérification IP préalable. Lorsqu’une messagerie transforme automatiquement le proxy de la commande `curl` en lien Markdown `mailto:`, Ghost Clicker retire uniquement cet emballage après avoir vérifié sa cohérence. Une valeur Markdown isolée, hors d’une commande `curl`, reste refusée.
+Les options `-x`, `-xVALEUR`, `--proxy` et `--proxy=VALEUR` sont reconnues sans jamais exécuter la commande. Chaque passerelle conserve un pays fixe et doit obligatoirement terminer son mot de passe de routage par `-country-US`, `-country-GB` pour le Royaume-Uni, ou `-country-CA`. Toute passerelle sans pays, ou avec un autre pays, est refusée avant son enregistrement et n’entre jamais dans la rotation. Cette contrainte force le routage demandé à Rayobyte sans effectuer de requête de vérification IP préalable. Lorsqu’une messagerie transforme automatiquement le proxy de la commande `curl` en lien Markdown `mailto:`, Ghost Clicker retire uniquement cet emballage après avoir vérifié sa cohérence. Une valeur Markdown isolée, hors d’une commande `curl`, reste refusée.
 
-La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Une seule entrée est active à la fois. Le pseudo, l’identifiant interne et la sélection active persistent dans les réglages Supabase. Les identifiants Rayobyte sont conservés durablement et chiffrés dans **Supabase Vault** ; ils ne sont jamais inclus dans les réglages, les réponses de l’API, les journaux ou Git. Un cache privé en mode `0600` dans `/tmp/ghost-clicker-proxy-gateways.json` sert uniquement à l’exécution locale. Après leur première saisie avec cette version, les passerelles restent disponibles après les redémarrages et redéploiements. La passerelle active doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
+La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Toutes les passerelles valides tournent automatiquement : chaque visite tire une passerelle éligible au hasard, sans sélection manuelle. Le pseudo et l’identifiant interne persistent dans les réglages Supabase. Les identifiants Rayobyte sont conservés durablement et chiffrés dans **Supabase Vault** ; ils ne sont jamais inclus dans les réglages, les réponses de l’API, les journaux ou Git. Un cache privé en mode `0600` dans `/tmp/ghost-clicker-proxy-gateways.json` sert uniquement à l’exécution locale. Après leur première saisie avec cette version, les passerelles restent disponibles après les redémarrages et redéploiements. Chaque passerelle de la rotation doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
 Les cibles ne nécessitent plus de fichier texte. La **Bibliothèque d’URL** permet d’ajouter chaque cible avec :
 
@@ -109,13 +109,13 @@ Après le build :
 
 ## Gérer la configuration en ligne
 
-Après connexion, l’interface React se présente comme un tableau de bord clair, chaleureux et responsive, avec des cartes crème, des accents vert olive et une navigation inspirée des applications mobiles premium. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et flottante en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
+Après connexion, l’interface React se présente comme un tableau de bord sombre et responsive, avec des surfaces anthracite, des accents vert olive et une navigation inspirée des applications mobiles premium. Les états vides (URLs, passerelles, résultats) sont de vraies cartes d’action, sans débordement horizontal de 320 px à 1440 px. Elle conserve cinq sections : **Accueil**, **URLs**, **Réseau**, **Résultats** et **Réglages**. La navigation est latérale sur grand écran et flottante en bas sur mobile. Le changement de section ne recharge pas la page. Les formulaires de cible et de passerelle s’ouvrent dans une fenêtre dédiée, et les mutations restent protégées par le jeton CSRF Flask.
 
-1. ouvrez **Réseau**, ajoutez une ou plusieurs passerelles avec leur pseudo et activez-en exactement une ;
+1. ouvrez **Réseau** et ajoutez une ou plusieurs passerelles avec leur pseudo : elles entrent toutes dans la rotation ;
 2. ouvrez **URL** et ajoutez les cibles une par une dans la bibliothèque ;
 3. utilisez les pseudos pour retrouver, consulter, modifier ou supprimer chaque entrée ;
 4. cochez les URL à utiliser, ou employez **Tout sélectionner** et **Tout désélectionner** ;
-5. revenez à **Accueil** et lancez le scénario : les exécutions manuelles et planifiées utilisent uniquement les URL cochées et la passerelle active.
+5. revenez à **Accueil** et lancez le scénario : les exécutions manuelles et planifiées utilisent uniquement les URL cochées et une passerelle tirée au hasard dans la rotation.
 
 Laissez les deux libellés vides pour une visite sans clic qui attend une redirection automatique. Si un premier libellé est saisi, il doit correspondre exactement au texte visible initial du bouton. Omettez le second libellé lorsque le premier clic redirige directement. Ajoutez-le pour demander un deuxième clic au même emplacement. Aucun texte traduit ni changement du DOM n’est utilisé pour déclencher ce deuxième clic.
 
@@ -140,7 +140,7 @@ Le plan de la campagne Intervalle est enregistré dans les réglages persistants
 
 Chaque cible cochée est visitée une fois par répétition, y compris lors de chaque exécution Intervalle ; les cibles non sélectionnées restent enregistrées mais ne sont pas ouvertes. Par exemple, 200 répétitions fixes et 3 cibles sélectionnées produisent 600 visites. Une seule exécution Google Chrome peut fonctionner à la fois.
 
-Les cibles, paramètres, passerelles complètes, sélection active, campagnes, exécutions et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
+Les cibles, paramètres, passerelles complètes, rotation, campagnes, exécutions et informations de planification sont persistants et survivent aux redémarrages et redéploiements Render. Les identifiants Rayobyte sont chiffrés séparément dans Supabase Vault et ne sont jamais exposés dans les métadonnées de configuration.
 
 ## Résultats
 
@@ -190,7 +190,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Pour utiliser `main.py` avec une seule URL, créez `proxy-gateway.txt` avec l’unique passerelle Rayobyte indiquée plus haut, puis remplissez aussi :
+Pour utiliser `main.py` en direct, créez `proxy-gateway.txt` avec une ou plusieurs passerelles Rayobyte séparées par une ligne vide, puis remplissez aussi :
 
 ```dotenv
 PROXY_GATEWAY_FILE="proxy-gateway.txt"
@@ -206,7 +206,7 @@ REPETITION_MAX=20
 HEADLESS=false
 ```
 
-La campagne **Intervalle** sur plusieurs jours dépend du planificateur persistant du service web et se configure donc dans l’interface, pas dans ce lancement direct de `main.py`. `proxy-gateway.txt` est ignoré par Git et doit rester local. Puis :
+Chaque visite de ce lancement direct tire elle aussi une passerelle au hasard dans le fichier. La campagne **Intervalle** sur plusieurs jours dépend du planificateur persistant du service web et se configure donc dans l’interface, pas dans ce lancement direct de `main.py`. `proxy-gateway.txt` est ignoré par Git et doit rester local. Puis :
 
 ```powershell
 python .\main.py
@@ -224,7 +224,7 @@ python .\main.py
 - maximum de 50 URL ;
 - zéro clic lorsque les libellés sont vides, un clic avec le seul premier libellé, ou deux clics au même emplacement lorsque les deux sont configurés ;
 - fréquence planifiée minimale de 60 minutes ;
-- nouvelle connexion à la passerelle rotative et nouveau navigateur pour chaque visite ;
+- nouvelle passerelle tirée au hasard et nouveau navigateur pour chaque visite ;
 - aucune requête de contrôle IP avant l’ouverture de la cible ;
 - nombre fixe, campagne Intervalle à horaires aléatoires sur plusieurs jours, ou exécution continue avec arrêt manuel ;
 - suppression automatique des visites les plus anciennes au-delà de 500 lignes ;
