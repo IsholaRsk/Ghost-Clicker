@@ -2,13 +2,13 @@
 
 Ghost-Clicker est un outil de **test fonctionnel autorisé**. Il propose trois modes configurables : un nombre fixe de répétitions, une campagne d’exécutions réparties aléatoirement sur plusieurs jours, ou une exécution continue jusqu’à l’arrêt manuel. Pour chaque visite, il :
 
-1. crée une nouvelle connexion à la passerelle rotative, sans effectuer de contrôle IP préalable ;
-2. ouvre immédiatement la page cible dans Google Chrome piloté par Playwright ;
+1. vérifie une fois par exécution l’IP de sortie, le pays et la réputation de chaque passerelle, puis ne garde que les conformes ;
+2. ouvre immédiatement la page cible dans Google Chrome piloté par Playwright, sans nouvelle requête de contrôle ;
 3. si aucun premier libellé n’est configuré, ne recherche et ne clique aucun bouton, mais attend une redirection automatique ou l’ouverture d’un nouvel onglet ;
 4. sinon, repère le premier libellé visible exact, mémorise sa position et clique une première fois ;
 5. si aucun second libellé n’est configuré, attend immédiatement soit le changement d’URL de l’onglet courant, soit l’ouverture d’un nouvel onglet ;
 6. si un second libellé est configuré, attend 500 ms, clique une seconde fois exactement au même emplacement, puis accepte ces mêmes deux formes de navigation ;
-7. enregistre le numéro de répétition, le proxy utilisé, l’URL finale, le statut et l’erreur éventuelle ;
+7. enregistre le numéro de répétition, la passerelle utilisée (alias), l’IP de sortie, la chaîne de redirections complète, l’URL finale, le statut et l’erreur éventuelle ;
 8. ferme complètement Google Chrome avant la visite suivante.
 
 Il effectue exactement zéro, un ou deux clics selon la cible, ne remplit aucun formulaire et n’imite pas un comportement humain. Utilisez-le uniquement sur des domaines que vous êtes autorisé à tester.
@@ -80,7 +80,9 @@ ou comme commande `curl` complète fournie par Rayobyte :
 curl https://rayobyte.com/ -x username:password-country-US@us-east.gw.rayobyte.com:8000
 ```
 
-Les options `-x`, `-xVALEUR`, `--proxy` et `--proxy=VALEUR` sont reconnues sans jamais exécuter la commande. Chaque passerelle conserve un pays fixe et doit obligatoirement terminer son mot de passe de routage par `-country-US`, `-country-GB` pour le Royaume-Uni, ou `-country-CA`. Toute passerelle sans pays, ou avec un autre pays, est refusée avant son enregistrement et n’entre jamais dans la rotation. Cette contrainte force le routage demandé à Rayobyte sans effectuer de requête de vérification IP préalable. Lorsqu’une messagerie transforme automatiquement le proxy de la commande `curl` en lien Markdown `mailto:`, Ghost Clicker retire uniquement cet emballage après avoir vérifié sa cohérence. Une valeur Markdown isolée, hors d’une commande `curl`, reste refusée.
+Les options `-x`, `-xVALEUR`, `--proxy` et `--proxy=VALEUR` sont reconnues sans jamais exécuter la commande. Chaque passerelle conserve un pays fixe et doit obligatoirement terminer son mot de passe de routage par `-country-US`, `-country-GB` pour le Royaume-Uni, ou `-country-CA`. Toute passerelle sans pays, ou avec un autre pays, est refusée avant son enregistrement et n’entre jamais dans la rotation. Au début de chaque exécution, le bot ouvre un écho d’IP **à travers chaque passerelle** : l’IP de sortie réelle est relevée, comparée au pays déclaré, puis contrôlée sur des listes noires DNS. Seules les passerelles conformes sont utilisées ; les autres sont affichées comme refusées avec leur motif, sans jamais exposer d’identifiants. Cette contrainte force le routage demandé à Rayobyte sans effectuer de requête de vérification IP préalable. Lorsqu’une messagerie transforme automatiquement le proxy de la commande `curl` en lien Markdown `mailto:`, Ghost Clicker retire uniquement cet emballage après avoir vérifié sa cohérence. Une valeur Markdown isolée, hors d’une commande `curl`, reste refusée.
+
+Le contrôle d’entrée se règle avec `PROXY_VERIFICATION_ENABLED` (activé par défaut), `IP_ECHO_URLS` (échos JSON interrogés dans l’ordre), `IP_COUNTRY_URL_TEMPLATE` et `DNSBL_ZONES`. Une panne d’écho ou de DNS ne casse jamais le bot : la passerelle concernée est simplement écartée, et l’exécution s’arrête avec un message clair s’il n’en reste aucune de conforme.
 
 La bibliothèque de passerelles accepte jusqu’à 20 entrées avec un pseudo. Toutes les passerelles valides tournent automatiquement : chaque visite tire une passerelle éligible au hasard, sans sélection manuelle. Le pseudo et l’identifiant interne persistent dans les réglages Supabase. Les identifiants Rayobyte sont conservés durablement et chiffrés dans **Supabase Vault** ; ils ne sont jamais inclus dans les réglages, les réponses de l’API, les journaux ou Git. Un cache privé en mode `0600` dans `/tmp/ghost-clicker-proxy-gateways.json` sert uniquement à l’exécution locale. Après leur première saisie avec cette version, les passerelles restent disponibles après les redémarrages et redéploiements. Chaque passerelle de la rotation doit attribuer une nouvelle IP à chaque connexion. N’utilisez jamais un identifiant déjà publié dans une conversation : réinitialisez-le d’abord chez le fournisseur.
 
@@ -225,8 +227,9 @@ python .\main.py
 - zéro clic lorsque les libellés sont vides, un clic avec le seul premier libellé, ou deux clics au même emplacement lorsque les deux sont configurés ;
 - fréquence planifiée minimale de 60 minutes ;
 - nouvelle passerelle tirée au hasard et nouveau navigateur pour chaque visite ;
-- aucune requête de contrôle IP avant l’ouverture de la cible ;
+- contrôle d’entrée par exécution : IP de sortie, pays attendu (US/GB/CA) et réputation DNSBL, puis navigation immédiate vers la cible sans autre requête de contrôle par visite ;
 - nombre fixe, campagne Intervalle à horaires aléatoires sur plusieurs jours, ou exécution continue avec arrêt manuel ;
+- conservation de la chaîne de redirection de chaque visite (URL initiale, étapes, destination finale) dans Supabase, le CSV et l’interface ;
 - suppression automatique des visites les plus anciennes au-delà de 500 lignes ;
 - aucune technique de dissimulation ou simulation de comportement humain.
 

@@ -74,6 +74,7 @@ RUN_STATE: dict[str, Any] = {
     "interval_campaign_active": False,
     "interval_campaign_total": 0,
     "interval_campaign_launched": 0,
+    "gateway_checks": [],
 }
 
 DEFAULT_APP_SETTINGS: dict[str, Any] = {
@@ -1543,6 +1544,21 @@ def execute_job(
                 else:
                     metrics_processed_visits = report.completed_visits
 
+        def update_gateway_checks(checks: list[dict[str, Any]]) -> None:
+            with STATE_LOCK:
+                RUN_STATE.update(gateway_checks=checks)
+            try:
+                record_database_event(
+                    "gateways_checked",
+                    {
+                        "run_id": run_id,
+                        "checks": checks,
+                        "updated_at": now_iso(),
+                    },
+                )
+            except (ConfigurationError, OSError):
+                pass
+
         report = run_targets(
             browser_settings,
             targets,
@@ -1552,6 +1568,7 @@ def execute_job(
             continuous_maximum=int(app_settings["repetition_max"]),
             should_stop=STOP_EVENT.is_set,
             on_progress=update_progress,
+            on_gateway_checks=update_gateway_checks,
         )
         upsert_report(report_value(report, in_progress=False))
         record_database_event(
@@ -2722,12 +2739,16 @@ def download_results() -> Response:
             "repetitions_planifiees",
             "cycle_continu",
             "repetitions_du_cycle",
-            "proxy",
+            "passerelle",
             "connexions_proxy",
+            "ip_sortie",
+            "pays_sortie",
+            "reputation_ip",
             "url_initiale",
             "premier_libelle",
             "second_libelle",
             "url_finale",
+            "chaine_redirections",
             "statut_initial",
             "statut_final",
             "succes",
@@ -2754,10 +2775,18 @@ def download_results() -> Response:
                     result.get("window_repetition_count", ""),
                     result.get("proxy_name", ""),
                     result.get("proxy_attempts", ""),
+                    result.get("exit_ip", ""),
+                    result.get("exit_country", ""),
+                    result.get("reputation", ""),
                     result.get("initial_url", ""),
                     result.get("button_text", ""),
                     result.get("second_button_text", ""),
                     result.get("final_url", ""),
+                    " -> ".join(
+                        str(hop)
+                        for hop in result.get("redirect_chain", [])
+                        if hop
+                    ),
                     result.get("initial_status", ""),
                     result.get("final_status", ""),
                     result.get("success", False),
@@ -2821,12 +2850,12 @@ def home() -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0c0e">
 <title>Ghost Clicker</title>
-<link rel="stylesheet" href="/static/app.css?v=8">
+<link rel="stylesheet" href="/static/app.css?v=10">
 </head>
 <body>
 <div id="root"></div>
 <script id="ghost-clicker-bootstrap" type="application/json">{bootstrap_json}</script>
-<script src="/static/app.js?v=8" defer></script>
+<script src="/static/app.js?v=10" defer></script>
 </body>
 </html>"""
 

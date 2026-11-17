@@ -8,14 +8,17 @@ import os
 import random
 import re
 import shlex
+import socket
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 DEFAULT_PROXY_GATEWAY_FILE = "/tmp/ghost-clicker-proxy-gateway.txt"
 EXECUTION_MODES = frozenset({"fixed", "range", "continuous"})
@@ -23,6 +26,16 @@ MAX_CONFIGURED_REPETITIONS = 10_000
 MAX_CONTINUOUS_RESULTS = 1_000
 CONTINUOUS_WINDOW_SECONDS = 5 * 60
 ALLOWED_PROXY_COUNTRY_CODES = frozenset({"US", "GB", "CA"})
+DEFAULT_IP_ECHO_URLS = (
+    "https://ipinfo.io/json",
+    "https://ifconfig.co/json",
+    "https://api.ipify.org?format=json",
+)
+DEFAULT_IP_COUNTRY_URL_TEMPLATE = "https://api.country.is/{ip}"
+DEFAULT_DNSBL_ZONES = ("zen.spamhaus.org", "bl.spamcop.net")
+DNSBL_BLOCKED_RESOLVER_PREFIX = "127.255.255."
+MAX_REDIRECT_CHAIN = 6
+MAX_REDIRECT_URL_LENGTH = 300
 
 
 class ConfigurationError(ValueError):
@@ -46,6 +59,34 @@ class ProxyConfig:
 
 
 @dataclass(frozen=True)
+class GatewayCheck:
+    """Résultat du contrôle d'une passerelle avant utilisation."""
+
+    name: str
+    country_code: str = ""
+    exit_ip: str = ""
+    exit_country: str = ""
+    listed_zones: tuple[str, ...] = ()
+    status: str = "unchecked"
+    error: str = ""
+
+    @property
+    def compliant(self) -> bool:
+        return self.status == "compliant"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "country_code": self.country_code,
+            "exit_ip": self.exit_ip,
+            "exit_country": self.exit_country,
+            "listed_zones": list(self.listed_zones),
+            "status": self.status,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
 class BrowserSettings:
     gateway: ProxyConfig
     headless: bool
@@ -55,6 +96,13 @@ class BrowserSettings:
     wait_after_redirect_seconds: float
     delay_between_targets_seconds: float
     gateways: tuple[ProxyConfig, ...] = ()
+    gateway_checks: tuple[GatewayCheck, ...] = ()
+
+    def gateway_check(self, gateway: ProxyConfig) -> GatewayCheck | None:
+        for check in self.gateway_checks:
+            if check.name == gateway.name:
+                return check
+        return None
 
     def gateway_pool(self) -> tuple[ProxyConfig, ...]:
         """Renvoie toutes les passerelles éligibles, sans doublon."""
@@ -97,7 +145,11 @@ class VisitResult:
     window_repetition_count: int = 0
     proxy_name: str = ""
     proxy_attempts: int = 0
+    exit_ip: str = ""
+    exit_country: str = ""
+    reputation: str = ""
     final_url: str = ""
+    redirect_chain: list[str] = field(default_factory=list)
     initial_status: int | None = None
     final_status: int | None = None
     success: bool = False
@@ -120,6 +172,7 @@ class RunReport:
     finished_at: str = ""
     success: bool = False
     error: str = ""
+    gateway_checks: list[dict[str, Any]] = field(default_factory=list)
     results: list[VisitResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -561,6 +614,240 @@ def load_browser_settings(base_dir: Path) -> BrowserSettings:
     )
 
 
+def proxy_verification_enabled() -> bool:
+    return parse_bool(
+        os.getenv("PROXY_VERIFICATION_ENABLED"),
+        True,
+        "PROXY_VERIFICATION_ENABLED",
+    )
+
+
+def ip_echo_urls() -> tuple[str, ...]:
+    raw = os.getenv("IP_ECHO_URLS", "").strip()
+    if not raw:
+        return DEFAULT_IP_ECHO_URLS
+    values = tuple(url.strip() for url in raw.split(",") if url.strip())
+    return values or DEFAULT_IP_ECHO_URLS
+
+
+def ip_country_url_template() -> str:
+    template = os.getenv(
+        "IP_COUNTRY_URL_TEMPLATE", DEFAULT_IP_COUNTRY_URL_TEMPLATE
+    ).strip()
+    if template and not template.startswith(("http://", "https://")):
+        raise ConfigurationError(
+            "IP_COUNTRY_URL_TEMPLATE doit utiliser http ou https."
+        )
+    return template
+
+
+def dnsbl_zones() -> tuple[str, ...]:
+    raw = os.getenv("DNSBL_ZONES")
+    if raw is None:
+        return DEFAULT_DNSBL_ZONES
+    return tuple(zone.strip() for zone in raw.split(",") if zone.strip())
+
+
+def identity_country(payload: dict[str, Any]) -> str:
+    """Extrait un code pays ISO à deux lettres d'une réponse JSON."""
+
+    for key in ("country_code", "country_iso", "countryCode", "country"):
+        value = str(payload.get(key, "")).strip().upper()
+        if len(value) == 2 and value.isalpha():
+            return value
+    return ""
+
+
+def identity_address(payload: dict[str, Any]) -> str:
+    for key in ("ip", "query", "origin", "ip_addr"):
+        value = str(payload.get(key, "")).split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(value))
+        except ValueError:
+            continue
+    return ""
+
+
+def lookup_ip_country(address: str) -> str:
+    """Résout le pays d'une IP publique déjà connue, hors proxy."""
+
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        return ""
+    template = ip_country_url_template()
+    if not template:
+        return ""
+    url = template.replace("{ip}", quote(address, safe=""))
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read(4_096).decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        return ""
+    return identity_country(payload) if isinstance(payload, dict) else ""
+
+
+def dnsbl_listings(address: str, zones: Sequence[str]) -> list[str]:
+    """Interroge les listes noires DNS ; une panne DNS ne bloque rien."""
+
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return []
+    if parsed.version != 4:
+        # Les zones DNSBL historiques ne couvrent pas IPv6.
+        return []
+    reversed_address = ".".join(reversed(str(parsed).split(".")))
+    listed: list[str] = []
+    deadline = time.monotonic() + 6
+    for zone in zones:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            answers = {
+                info[4][0]
+                for info in socket.getaddrinfo(
+                    f"{reversed_address}.{zone}", None
+                )
+            }
+        except (socket.gaierror, OSError):
+            continue
+        # 127.255.255.x signale un résolveur refusé, pas une IP listée.
+        if any(
+            answer.startswith("127.")
+            and not answer.startswith(DNSBL_BLOCKED_RESOLVER_PREFIX)
+            for answer in answers
+        ):
+            listed.append(zone)
+    return listed
+
+
+def fetch_exit_identity(
+    playwright: Any,
+    settings: BrowserSettings,
+    gateway: ProxyConfig,
+) -> tuple[str, str]:
+    """Ouvre un écho d'IP à travers la passerelle et renvoie (IP, pays)."""
+
+    browser = None
+    errors: list[str] = []
+    try:
+        browser = playwright.chromium.launch(
+            channel="chrome", headless=settings.headless
+        )
+        context = browser.new_context(proxy=gateway.playwright_proxy())
+        context.set_default_navigation_timeout(settings.navigation_timeout_ms)
+        page = context.new_page()
+        for url in ip_echo_urls():
+            try:
+                response = page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=min(settings.navigation_timeout_ms, 20_000),
+                )
+                if response is None:
+                    raise RuntimeError("aucune réponse HTTP")
+                if response.status >= 400:
+                    raise RuntimeError(f"statut HTTP {response.status}")
+                payload = json.loads(page.inner_text("body") or "{}")
+                if not isinstance(payload, dict):
+                    raise RuntimeError("réponse inattendue")
+                address = identity_address(payload)
+                if not address:
+                    raise RuntimeError("IP de sortie absente")
+                country = identity_country(payload) or lookup_ip_country(address)
+                return address, country
+            except Exception as exc:  # noqa: BLE001 - écho suivant
+                errors.append(f"{url} ({exc})")
+        raise RuntimeError("; ".join(errors[:2]) or "écho d'IP indisponible")
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+def check_gateway(
+    playwright: Any,
+    settings: BrowserSettings,
+    gateway: ProxyConfig,
+) -> GatewayCheck:
+    """Vérifie IP de sortie, pays attendu et réputation DNSBL."""
+
+    try:
+        address, country = fetch_exit_identity(playwright, settings, gateway)
+    except Exception as exc:  # noqa: BLE001 - passerelle refusée
+        # Le message est nettoyé avec la passerelle contrôlée incluse dans
+        # le pool, même si elle n'est pas encore sélectionnée.
+        redaction = replace(
+            settings, gateways=(*settings.gateway_pool(), gateway)
+        )
+        return GatewayCheck(
+            name=gateway.name,
+            country_code=gateway.country_code,
+            status="rejected",
+            error=redact_error(exc, redaction),
+        )
+    zones = dnsbl_zones()
+    listed = dnsbl_listings(address, zones)
+    base = {
+        "name": gateway.name,
+        "country_code": gateway.country_code,
+        "exit_ip": address,
+        "exit_country": country,
+        "listed_zones": tuple(listed),
+    }
+    if not country:
+        return GatewayCheck(
+            **base,
+            status="rejected",
+            error="Pays de sortie indéterminé.",
+        )
+    if country != gateway.country_code:
+        return GatewayCheck(
+            **base,
+            status="rejected",
+            error=(
+                f"Pays de sortie {country} au lieu de "
+                f"{gateway.country_code}."
+            ),
+        )
+    if listed:
+        return GatewayCheck(
+            **base,
+            status="rejected",
+            error=f"IP listée : {', '.join(listed)}.",
+        )
+    return GatewayCheck(**base, status="compliant")
+
+
+def verify_gateway_pool(
+    playwright: Any,
+    settings: BrowserSettings,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[tuple[ProxyConfig, ...], list[GatewayCheck]]:
+    """Ne conserve que les passerelles conformes, contrôlées une fois par run."""
+
+    pool = settings.gateway_pool()
+    if not proxy_verification_enabled():
+        checks = [
+            GatewayCheck(name=gateway.name, country_code=gateway.country_code)
+            for gateway in pool
+        ]
+        return pool, checks
+    checks: list[GatewayCheck] = []
+    compliant: list[ProxyConfig] = []
+    for gateway in pool:
+        if should_stop is not None and should_stop():
+            break
+        check = check_gateway(playwright, settings, gateway)
+        checks.append(check)
+        if check.compliant:
+            compliant.append(gateway)
+    return tuple(compliant), checks
+
+
 def redact_error(error: BaseException | str, settings: BrowserSettings) -> str:
     message = str(error).replace("\r", " ").replace("\n", " ").strip()
     secrets = [
@@ -644,6 +931,29 @@ def wait_for_navigation_outcome(
     return destination
 
 
+class RedirectTracker:
+    """Mémorise les URL de navigation principale d'une visite."""
+
+    def __init__(self, limit: int = MAX_REDIRECT_CHAIN) -> None:
+        self._urls: list[str] = []
+        self._limit = max(1, limit)
+
+    def remember(self, value: str) -> None:
+        if not value or value == "about:blank":
+            return
+        value = value[:MAX_REDIRECT_URL_LENGTH]
+        if self._urls and self._urls[-1] == value:
+            return
+        self._urls.append(value)
+
+    def finalize(self, final_url: str = "") -> list[str]:
+        if final_url:
+            self.remember(final_url)
+        # Les dernières étapes sont les plus utiles : la destination reste
+        # aussi enregistrée séparément dans ``final_url``.
+        return self._urls[-self._limit :]
+
+
 def wait_for_redirect(page: Any, previous_url: str, timeout_ms: int) -> None:
     """Compatibilité : attend uniquement la redirection de la page courante."""
 
@@ -700,6 +1010,7 @@ def visit_target(
     record_navigation_handler: Any | None = None
     new_page_handler: Any | None = None
     opened_pages: list[Any] = []
+    redirects = RedirectTracker()
 
     try:
         # L'API Playwright conserve le nom « chromium », mais le canal
@@ -708,14 +1019,42 @@ def visit_target(
             channel="chrome", headless=settings.headless
         )
         # Chaque visite tire une passerelle au hasard parmi les éligibles.
-        context, page = open_proxy_context(
-            browser, settings, result, settings.pick_gateway()
-        )
+        gateway = settings.pick_gateway()
+        check = settings.gateway_check(gateway)
+        if check is not None:
+            result.exit_ip = check.exit_ip
+            result.exit_country = check.exit_country
+            result.reputation = (
+                "listée"
+                if check.listed_zones
+                else ("propre" if check.compliant else "non vérifiée")
+            )
+        context, page = open_proxy_context(browser, settings, result, gateway)
         install_request_guard(page)
+
+        def record_frame_navigation(
+            frame: Any, current_page: Any = page
+        ) -> None:
+            try:
+                if frame == current_page.main_frame:
+                    redirects.remember(frame.url)
+            except Exception:
+                return
+
+        page.on("framenavigated", record_frame_navigation)
 
         def record_new_page(new_page: Any) -> None:
             if new_page is not page:
                 opened_pages.append(new_page)
+                try:
+                    new_page.on(
+                        "framenavigated",
+                        lambda frame, popup=new_page: record_frame_navigation(
+                            frame, popup
+                        ),
+                    )
+                except Exception:
+                    pass
 
         new_page_handler = record_new_page
         context.on("page", new_page_handler)
@@ -833,6 +1172,7 @@ def visit_target(
                 browser.close()
             except Exception:
                 pass
+        result.redirect_chain = redirects.finalize(result.final_url)
         result.duration_ms = round((time.monotonic() - started) * 1_000)
     return result
 
@@ -863,6 +1203,7 @@ def run_targets(
     continuous_window_seconds: float = CONTINUOUS_WINDOW_SECONDS,
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[RunReport], None] | None = None,
+    on_gateway_checks: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> RunReport:
     if not targets:
         raise ConfigurationError("Aucune URL n'est configurée.")
@@ -913,6 +1254,32 @@ def run_targets(
 
     with sync_playwright() as playwright:
         try:
+            # Une seule vérification par exécution : seules les passerelles
+            # dont l'IP de sortie, le pays et la réputation sont conformes
+            # entrent dans la rotation.
+            verified_gateways, gateway_checks = verify_gateway_pool(
+                playwright, settings, should_stop
+            )
+            report.gateway_checks = [
+                check.to_dict() for check in gateway_checks
+            ]
+            if on_gateway_checks is not None:
+                try:
+                    on_gateway_checks(report.gateway_checks)
+                except Exception:
+                    pass
+            if not verified_gateways:
+                raise ConfigurationError(
+                    "Aucune passerelle conforme : IP de sortie ou "
+                    "réputation refusée."
+                )
+            settings = replace(
+                settings,
+                gateway=verified_gateways[0],
+                gateways=verified_gateways,
+                gateway_checks=tuple(gateway_checks),
+            )
+
             repetition = 0
             window_repetitions_remaining = 0
             window_deadline = 0.0

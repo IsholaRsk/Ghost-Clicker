@@ -1,6 +1,7 @@
 import base64
 import csv
 import io
+import json
 import os
 import stat
 import tempfile
@@ -98,8 +99,8 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn('<div id="root"></div>', content)
         self.assertIn('id="ghost-clicker-bootstrap"', content)
-        self.assertIn('src="/static/app.js?v=8"', content)
-        self.assertIn('href="/static/app.css?v=8"', content)
+        self.assertIn('src="/static/app.js?v=10"', content)
+        self.assertIn('href="/static/app.css?v=10"', content)
         self.assertIn('name="theme-color" content="#0b0c0e"', content)
         self.assertIn('"lifetime_successful_visits":0', content)
         self.assertNotIn('http-equiv="refresh"', content)
@@ -129,6 +130,13 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("-country-GB", javascript)
         self.assertIn("Pays requis", javascript)
         self.assertIn("Rotation aléatoire", javascript)
+        self.assertIn("IP de sortie et réputation", javascript)
+        self.assertIn("Passerelle", javascript)
+        self.assertIn("proxy_name", javascript)
+        self.assertIn("CONTRÔLE D’ENTRÉE", javascript)
+        self.assertIn("chaine_redirections", (web.BASE_DIR / "web.py").read_text(encoding="utf-8"))
+        self.assertIn(".check-panel", stylesheet)
+        self.assertIn(".chain", stylesheet)
         self.assertIn("En rotation", javascript)
         self.assertIn("Aucune URL enregistrée", javascript)
         self.assertIn("Aucune passerelle enregistrée", javascript)
@@ -1237,6 +1245,108 @@ class WebUploadTests(unittest.TestCase):
             1,
         )
 
+    def test_job_publishes_gateway_checks_and_visit_identity(self):
+        web.save_app_settings(
+            {
+                "targets": [
+                    {
+                        "url": "https://example.com/page",
+                        "button_text": "Entrer",
+                        "second_button_text": "",
+                    }
+                ],
+                "schedule_enabled": False,
+                "interval_minutes": 60,
+                "execution_mode": "fixed",
+                "repetition_count": 1,
+                "repetition_min": 1,
+                "repetition_max": 10,
+            }
+        )
+        checks = [
+            {
+                "name": "Rayobyte US",
+                "country_code": "US",
+                "exit_ip": "198.51.100.4",
+                "exit_country": "US",
+                "listed_zones": [],
+                "status": "compliant",
+                "error": "",
+            },
+            {
+                "name": "Rayobyte UK",
+                "country_code": "GB",
+                "exit_ip": "198.51.100.5",
+                "exit_country": "FR",
+                "listed_zones": [],
+                "status": "rejected",
+                "error": "Pays de sortie FR au lieu de GB.",
+            },
+        ]
+
+        def fake_run_targets(_settings, targets, **kwargs):
+            kwargs["on_gateway_checks"](checks)
+            report = web.RunReport(
+                started_at="now",
+                execution_mode="fixed",
+                repetition_count=1,
+            )
+            report.gateway_checks = checks
+            report.results.append(
+                main.VisitResult(
+                    started_at="visit",
+                    initial_url=targets[0].url,
+                    button_text=targets[0].button_text,
+                    second_button_text="",
+                    target_id=targets[0].target_id,
+                    exit_ip="198.51.100.4",
+                    exit_country="US",
+                    reputation="propre",
+                    final_url="https://offer.example/final",
+                    redirect_chain=[
+                        "https://example.com/page",
+                        "https://track.example/hop",
+                        "https://offer.example/final",
+                    ],
+                    success=True,
+                )
+            )
+            report.completed_repetitions = 1
+            report.completed_visits = 1
+            kwargs["on_progress"](report)
+            report.success = True
+            report.finished_at = "done"
+            return report
+
+        with (
+            mock.patch("web.load_browser_settings", return_value=object()),
+            mock.patch("web.run_targets", side_effect=fake_run_targets),
+        ):
+            web.execute_job("manuel")
+
+        with web.STATE_LOCK:
+            state = dict(web.RUN_STATE)
+        self.assertEqual(state["gateway_checks"], checks)
+
+        reports = web.load_reports()
+        self.assertEqual(reports[0]["gateway_checks"], checks)
+        result = reports[0]["results"][0]
+        self.assertEqual(result["exit_ip"], "198.51.100.4")
+        self.assertEqual(result["exit_country"], "US")
+        self.assertEqual(result["reputation"], "propre")
+        self.assertEqual(
+            result["redirect_chain"],
+            [
+                "https://example.com/page",
+                "https://track.example/hop",
+                "https://offer.example/final",
+            ],
+        )
+
+        snapshot = self.client.get("/api/state", headers=self.headers)
+        self.assertEqual(snapshot.get_json()["run"]["gateway_checks"], checks)
+        self.assertNotIn("sample-pass", json.dumps(snapshot.get_json()))
+
     def test_results_can_be_deleted_by_visit_run_or_all_from_the_api(self):
         web.append_report(
             {
@@ -1376,7 +1486,7 @@ class WebUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("inconnue", response.get_json()["error"])
 
-    def test_csv_includes_the_execution_mode_without_ip_check_columns(self):
+    def test_csv_includes_the_execution_mode_ip_check_and_redirect_chain(self):
         web.append_report(
             {
                 "source": "manuel",
@@ -1386,11 +1496,20 @@ class WebUploadTests(unittest.TestCase):
                     {
                         "started_at": "2026-10-30T00:00:00+00:00",
                         "repetition": 7,
-                        "proxy_name": "passerelle-rotative",
+                        "proxy_name": "Rayobyte US",
                         "proxy_attempts": 1,
+                        "exit_ip": "198.51.100.24",
+                        "exit_country": "US",
+                        "reputation": "propre",
                         "initial_url": "https://first.example/page",
                         "button_text": "Continuer",
                         "second_button_text": "Confirmer",
+                        "final_url": "https://offer.example/final",
+                        "redirect_chain": [
+                            "https://first.example/page",
+                            "https://track.example/hop",
+                            "https://offer.example/final",
+                        ],
                         "success": True,
                     },
                     {
@@ -1415,17 +1534,24 @@ class WebUploadTests(unittest.TestCase):
         self.assertIn("cible_id,pseudo_cible,mode_execution", content)
         self.assertIn("mode_execution,repetition", content)
         self.assertIn("repetition,repetitions_planifiees", content)
-        self.assertIn(
-            ",range,7,200,,,passerelle-rotative,1,", content
-        )
+        self.assertIn("ip_sortie,pays_sortie,reputation_ip", content)
+        self.assertIn("chaine_redirections", content)
+        self.assertIn(",range,7,200,,,Rayobyte US,1,", content)
         rows = list(csv.DictReader(io.StringIO(content)))
         self.assertEqual(rows[1]["premier_libelle"], "")
         self.assertEqual(rows[1]["second_libelle"], "")
         self.assertEqual(
             rows[1]["url_finale"], "https://visit-only.example/page"
         )
-        self.assertNotIn("ip_sortie", content)
-        self.assertNotIn("pays", content)
+        self.assertEqual(rows[0]["passerelle"], "Rayobyte US")
+        self.assertEqual(rows[0]["ip_sortie"], "198.51.100.24")
+        self.assertEqual(rows[0]["pays_sortie"], "US")
+        self.assertEqual(rows[0]["reputation_ip"], "propre")
+        self.assertEqual(
+            rows[0]["chaine_redirections"],
+            "https://first.example/page -> https://track.example/hop -> "
+            "https://offer.example/final",
+        )
 
     def test_csv_automatically_keeps_only_the_latest_500_rows(self):
         web.append_report(

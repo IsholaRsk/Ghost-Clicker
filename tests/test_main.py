@@ -25,6 +25,12 @@ def make_settings(gateway=None):
     )
 
 
+def unstubbed_gateway_pool(_playwright, settings, should_stop=None):
+    """Neutralise le contrôle d'IP pour les scénarios de navigation."""
+
+    return settings.gateway_pool(), []
+
+
 class ValidationTests(unittest.TestCase):
     def test_accepts_public_urls_from_unrelated_domains(self):
         for value in (
@@ -481,6 +487,220 @@ class ProxyGatewayConnectionTests(unittest.TestCase):
         )
 
 
+class GatewayVerificationTests(unittest.TestCase):
+    gateway = main.ProxyConfig(
+        "Rayobyte US",
+        "http://proxy-us.example:8000",
+        "sample-user",
+        "sample-pass-country-US",
+        "US",
+    )
+
+    def test_identity_country_reads_the_known_echo_formats(self):
+        self.assertEqual(
+            main.identity_country({"ip": "198.51.100.4", "country": "US"}),
+            "US",
+        )
+        self.assertEqual(
+            main.identity_country({"ip": "198.51.100.4", "country_iso": "gb"}),
+            "GB",
+        )
+        self.assertEqual(
+            main.identity_country({"country": "United States"}), "")
+
+    def test_identity_address_normalises_the_reported_address(self):
+        self.assertEqual(main.identity_address({"ip": "198.51.100.4"}), "198.51.100.4")
+        self.assertEqual(main.identity_address({"query": "203.0.113.9, 10.0.0.1"}), "203.0.113.9")
+        self.assertEqual(main.identity_address({"ip": "inconnue"}), "")
+
+    def test_dnsbl_detects_listings_and_ignores_blocked_resolvers(self):
+        answers = {
+            "4.100.51.198.zen.spamhaus.org": [("127.0.0.11",)],
+            "4.100.51.198.bl.spamcop.net": [("127.255.255.254",)],
+        }
+
+        def fake_getaddrinfo(host, _port):
+            if host not in answers:
+                raise main.socket.gaierror("absent")
+            return [(None, None, None, None, (address, 0)) for (address,) in answers[host]]
+
+        with mock.patch("main.socket.getaddrinfo", side_effect=fake_getaddrinfo):
+            listed = main.dnsbl_listings(
+                "198.51.100.4", ("zen.spamhaus.org", "bl.spamcop.net", "autre.example")
+            )
+
+        self.assertEqual(listed, ["zen.spamhaus.org"])
+
+    def test_check_gateway_accepts_a_clean_matching_exit(self):
+        with (
+            mock.patch(
+                "main.fetch_exit_identity", return_value=("198.51.100.4", "US")
+            ),
+            mock.patch("main.dnsbl_listings", return_value=[]),
+        ):
+            check = main.check_gateway(object(), make_settings(), self.gateway)
+
+        self.assertTrue(check.compliant)
+        self.assertEqual(check.exit_ip, "198.51.100.4")
+        self.assertEqual(check.exit_country, "US")
+        self.assertEqual(check.to_dict()["status"], "compliant")
+
+    def test_check_gateway_rejects_a_wrong_exit_country(self):
+        with (
+            mock.patch(
+                "main.fetch_exit_identity", return_value=("198.51.100.4", "FR")
+            ),
+            mock.patch("main.dnsbl_listings", return_value=[]),
+        ):
+            check = main.check_gateway(object(), make_settings(), self.gateway)
+
+        self.assertFalse(check.compliant)
+        self.assertEqual(check.status, "rejected")
+        self.assertIn("FR", check.error)
+        self.assertIn("US", check.error)
+
+    def test_check_gateway_rejects_a_listed_address(self):
+        with (
+            mock.patch(
+                "main.fetch_exit_identity", return_value=("198.51.100.4", "US")
+            ),
+            mock.patch(
+                "main.dnsbl_listings", return_value=["zen.spamhaus.org"]
+            ),
+        ):
+            check = main.check_gateway(object(), make_settings(), self.gateway)
+
+        self.assertFalse(check.compliant)
+        self.assertIn("zen.spamhaus.org", check.error)
+
+    def test_check_gateway_reports_an_unreachable_echo_without_secrets(self):
+        with mock.patch(
+            "main.fetch_exit_identity",
+            side_effect=RuntimeError("proxy sample-pass-country-US refusé"),
+        ):
+            check = main.check_gateway(object(), make_settings(), self.gateway)
+
+        self.assertFalse(check.compliant)
+        self.assertNotIn("sample-pass-country-US", check.error)
+
+    def test_verify_gateway_pool_keeps_only_compliant_gateways(self):
+        second = main.ProxyConfig(
+            "Rayobyte UK",
+            "http://proxy-uk.example:8001",
+            "sample-user-uk",
+            "sample-pass-country-GB",
+            "GB",
+        )
+        first = self.gateway
+        settings = main.BrowserSettings(
+            gateway=first,
+            headless=True,
+            navigation_timeout_ms=30_000,
+            click_timeout_ms=15_000,
+            redirect_timeout_ms=30_000,
+            wait_after_redirect_seconds=0,
+            delay_between_targets_seconds=0,
+            gateways=(first, second),
+        )
+        checks = {
+            "Rayobyte US": main.GatewayCheck(
+                name="Rayobyte US", country_code="US", status="compliant"
+            ),
+            "Rayobyte UK": main.GatewayCheck(
+                name="Rayobyte UK",
+                country_code="GB",
+                status="rejected",
+                error="IP listée.",
+            ),
+        }
+
+        with mock.patch(
+            "main.check_gateway", side_effect=lambda _p, _s, gateway: checks[gateway.name]
+        ):
+            pool, results = main.verify_gateway_pool(object(), settings)
+
+        self.assertEqual([gateway.name for gateway in pool], ["Rayobyte US"])
+        self.assertEqual(len(results), 2)
+        self.assertFalse(results[1].compliant)
+
+    def test_verification_can_be_disabled_by_environment(self):
+        settings = make_settings()
+        with mock.patch.dict(
+            os.environ, {"PROXY_VERIFICATION_ENABLED": "false"}, clear=False
+        ):
+            pool, checks = main.verify_gateway_pool(object(), settings)
+
+        self.assertEqual(pool, settings.gateway_pool())
+        self.assertEqual(checks[0].status, "unchecked")
+
+    def test_run_refuses_to_start_without_a_compliant_gateway(self):
+        class FakePlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *_args):
+                return None
+
+        rejected = main.GatewayCheck(
+            name="Rayobyte US",
+            country_code="US",
+            exit_ip="198.51.100.4",
+            exit_country="FR",
+            status="rejected",
+            error="Pays de sortie FR au lieu de US.",
+        )
+        reported = []
+
+        with (
+            mock.patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=FakePlaywrightManager(),
+            ),
+            mock.patch(
+                "main.verify_gateway_pool", return_value=((), [rejected])
+            ),
+            mock.patch("main.visit_target") as visit,
+        ):
+            report = main.run_targets(
+                make_settings(), [main.Target("https://example.com")], 1
+            )
+
+        self.assertFalse(report.success)
+        self.assertIn("Aucune passerelle conforme", report.error)
+        self.assertEqual(report.gateway_checks[0]["status"], "rejected")
+        visit.assert_not_called()
+        self.assertEqual(reported, [])
+
+    def test_redirect_tracker_keeps_the_navigation_chain(self):
+        tracker = main.RedirectTracker(limit=4)
+        tracker.remember("https://first.example/page")
+        tracker.remember("https://first.example/page")
+        tracker.remember("about:blank")
+        tracker.remember("")
+        tracker.remember("https://track.example/hop")
+        tracker.remember("https://offer.example/one")
+        tracker.remember("https://offer.example/two")
+
+        self.assertEqual(
+            tracker.finalize("https://offer.example/two"),
+            [
+                "https://first.example/page",
+                "https://track.example/hop",
+                "https://offer.example/one",
+                "https://offer.example/two",
+            ],
+        )
+
+    def test_redirect_tracker_appends_the_destination_once(self):
+        tracker = main.RedirectTracker()
+        tracker.remember("https://first.example/page")
+
+        self.assertEqual(
+            tracker.finalize("https://offer.example/final"),
+            ["https://first.example/page", "https://offer.example/final"],
+        )
+
+
 class BrowserLifecycleTests(unittest.TestCase):
     def test_launches_and_fully_closes_a_browser_for_each_target(self):
         class FakeResponse:
@@ -646,8 +866,13 @@ class BrowserLifecycleTests(unittest.TestCase):
             main.Target("https://visit-only.example/page"),
         ]
 
-        with mock.patch(
-            "playwright.sync_api.sync_playwright", return_value=manager
+        with (
+            mock.patch(
+                "playwright.sync_api.sync_playwright", return_value=manager
+            ),
+            mock.patch(
+                "main.verify_gateway_pool", side_effect=unstubbed_gateway_pool
+            ),
         ):
             report = main.run_targets(
                 settings,
@@ -764,6 +989,9 @@ class RepetitionPlanTests(unittest.TestCase):
                 return_value=FakePlaywrightManager(),
             ),
             mock.patch("main.visit_target", side_effect=fake_visit),
+            mock.patch(
+                "main.verify_gateway_pool", side_effect=unstubbed_gateway_pool
+            ),
         ):
             report = main.run_targets(
                 make_settings(),
@@ -821,6 +1049,9 @@ class RepetitionPlanTests(unittest.TestCase):
                 return_value=FakePlaywrightManager(),
             ),
             mock.patch("main.visit_target", side_effect=fake_visit),
+            mock.patch(
+                "main.verify_gateway_pool", side_effect=unstubbed_gateway_pool
+            ),
             mock.patch("main.random.randint", side_effect=[2, 3]) as choose,
             mock.patch(
                 "main.wait_with_cancellation", side_effect=fake_wait
